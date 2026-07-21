@@ -1,0 +1,11 @@
+{
+  "name": "leave-portal",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev --prefix web",
+    "build": "npm run build --prefix web",
+    "start": "npm run start --prefix web",
+    "setup:sheets": "npm run setup:sheets --prefix web"
+  }
+}
