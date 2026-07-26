@@ -133,4 +133,16 @@ openssl rand -hex 32
 
 ## Vercel 배포
 
-Vercel 프로젝트의 Root Directory를 `web`으로 지정하고 `.env.local`과 동일한 환경변수를 등록합니다. 실제 운영에서는 `LEAVE_DEMO_MODE=false`로 설정합니다.
+Vercel 프로젝트의 Root Directory를 `web`으로 지정하고 실제 운영에서는 `LEAVE_DEMO_MODE=false`로 설정합니다.
+
+Firebase Admin은 Production 배포에서 Vercel OIDC 토큰을 Google Cloud 단기 인증 정보로 교환합니다. Vercel의 OIDC Federation을 Team 모드로 활성화하고 다음 값을 Production 환경에만 등록합니다.
+
+```dotenv
+GCP_PROJECT_ID=safeai-vacation-b623a
+GCP_PROJECT_NUMBER=숫자로-된-프로젝트-번호
+GCP_SERVICE_ACCOUNT_EMAIL=Vercel용-서비스-계정-이메일
+GCP_WORKLOAD_IDENTITY_POOL_ID=워크로드-아이덴티티-풀-ID
+GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID=OIDC-공급업체-ID
+```
+
+`VERCEL_OIDC_TOKEN`은 Vercel이 요청마다 제공하므로 직접 등록하지 않습니다. OIDC 구성에서는 `FIREBASE_SERVICE_ACCOUNT_JSON`도 등록하지 않습니다. 로컬 개발은 위 GCP 환경변수를 생략하고 Google Cloud CLI의 Application Default Credentials를 계속 사용합니다.

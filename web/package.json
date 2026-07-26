@@ -10,8 +10,10 @@
     "setup:firebase": "node scripts/initialize-firestore.mjs"
   },
   "dependencies": {
+    "@vercel/oidc": "^3.8.1",
     "dotenv": "^16.4.5",
     "firebase-admin": "^14.1.0",
+    "google-auth-library": "^10.9.1",
     "next": "^16.2.10",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
