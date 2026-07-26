@@ -72,9 +72,18 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
         <h1>연차 데이터를 불러오지 못했습니다.</h1>
         <p>{dashboard.error}</p>
         <div className="setup-list">
-          <span>1</span><p>잠시 후 페이지를 새로고침합니다.</p>
-          <span>2</span><p>관리자는 서버 로그와 Firestore 인증 상태를 확인합니다.</p>
-          <span>3</span><p>연결 복구 후 <code>기록 관리</code> 탭의 실패 로그를 확인 처리합니다.</p>
+          <span>1</span><p>진단 코드: <code>{dashboard.connectionDiagnostic?.code ?? 'FIREBASE_UNKNOWN'}</code></p>
+          {dashboard.connectionDiagnostic?.expectedPrincipal && (
+            <>
+              <span>2</span><p>예상 IAM 주체: <code>{dashboard.connectionDiagnostic.expectedPrincipal}</code></p>
+            </>
+          )}
+          {dashboard.connectionDiagnostic?.oidcIssuer && (
+            <>
+              <span>3</span><p>OIDC Issuer: <code>{dashboard.connectionDiagnostic.oidcIssuer}</code></p>
+            </>
+          )}
+          <span>!</span><p>민감한 토큰과 환경변수 값은 화면에 표시하지 않습니다.</p>
         </div>
       </section>
     );

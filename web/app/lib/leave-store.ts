@@ -5,7 +5,7 @@ import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { isDemoMode } from './auth';
 import { DomainError as Error } from './api-error';
 import { resolveApprovalRoute, type ApprovalRouteError } from './approval-routing-policy';
-import { firestore } from './firebase-admin';
+import { diagnoseFirebaseConnection, firestore, type FirebaseConnectionDiagnostic } from './firebase-admin';
 import { hasSufficientLeaveBalance, normalizedAvailableDays } from './leave-balance-policy';
 import { firstLeaveUsageDate, resolveCancellationPolicy } from './leave-cancellation-policy';
 import { calculateRewardReclaim, validateRewardGrantAdjustment } from './reward-grant-policy';
@@ -79,6 +79,7 @@ export interface LeaveDashboard {
   connected: boolean;
   source: 'firebase' | 'demo';
   error?: string;
+  connectionDiagnostic?: FirebaseConnectionDiagnostic;
   balances: EmployeeBalance[];
   adminEmployees: EmployeeBalance[];
   requests: LeaveRequest[];
@@ -818,6 +819,12 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
       },
     };
   } catch (error) {
+    const connectionDiagnostic = await diagnoseFirebaseConnection(error);
+    console.error('leave_dashboard_load_failed', {
+      actorEmail: email,
+      diagnostic: connectionDiagnostic,
+      message: error instanceof globalThis.Error ? error.message : 'unknown',
+    });
     await recordOperationFailure({
       actorEmail: email,
       operation: 'DASHBOARD_LOAD',
@@ -827,7 +834,8 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
     return {
       connected: false,
       source: 'firebase',
-      error: '연차 데이터를 불러오지 못했습니다. 잠시 후 다시 시도하고, 계속되면 관리자 실패 로그를 확인해 주세요.',
+      error: connectionDiagnostic.message,
+      connectionDiagnostic,
       balances: [],
       adminEmployees: [],
       requests: [],

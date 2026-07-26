@@ -10,11 +10,11 @@ coverage/
 *.tsbuildinfo
 next-env.d.ts
 
-# Environment variables (keep only sanitized examples)
+# Environment variables
 .env
 .env.*
-!.env.example
-!**/.env.example
+.env.example
+**/.env.example
 
 # Vercel local project metadata
 .vercel/
