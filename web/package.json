@@ -10,6 +10,7 @@
     "setup:firebase": "node scripts/initialize-firestore.mjs"
   },
   "dependencies": {
+    "@google-cloud/firestore": "^8.6.0",
     "@vercel/oidc": "^3.8.1",
     "dotenv": "^16.4.5",
     "firebase-admin": "^14.1.0",

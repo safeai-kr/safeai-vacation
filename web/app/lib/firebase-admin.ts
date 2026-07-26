@@ -1,16 +1,16 @@
 import 'server-only';
 
+import { Firestore } from '@google-cloud/firestore';
 import { getVercelOidcToken } from '@vercel/oidc';
 import {
   applicationDefault,
   cert,
   getApps,
   initializeApp,
-  type Credential,
   type ServiceAccount,
 } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import { ExternalAccountClient } from 'google-auth-library';
+import { ExternalAccountClient, GoogleAuth } from 'google-auth-library';
 
 type WorkloadIdentityConfig = {
   projectNumber: string;
@@ -43,6 +43,9 @@ const WORKLOAD_IDENTITY_ENV = {
   poolId: 'GCP_WORKLOAD_IDENTITY_POOL_ID',
   providerId: 'GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID',
 } as const;
+
+let workloadIdentityFirestore: Firestore | null = null;
+let workloadIdentityFirestoreKey = '';
 
 function serviceAccountCredentials(): ServiceAccount | null {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
@@ -83,7 +86,7 @@ function workloadIdentityConfig(): WorkloadIdentityConfig | null {
   return values;
 }
 
-function workloadIdentityCredential(config: WorkloadIdentityConfig): Credential {
+function workloadIdentityAuthClient(config: WorkloadIdentityConfig) {
   const audience = [
     '//iam.googleapis.com/projects',
     config.projectNumber,
@@ -112,23 +115,33 @@ function workloadIdentityCredential(config: WorkloadIdentityConfig): Credential 
     throw new Error('Vercel Workload Identity 인증 클라이언트를 생성하지 못했습니다.');
   }
 
-  return {
-    async getAccessToken() {
-      const response = await authClient.getAccessToken();
-      if (!response.token) {
-        throw new Error('Vercel Workload Identity에서 Google 액세스 토큰을 받지 못했습니다.');
-      }
+  return authClient;
+}
 
-      const expiryDate = authClient.credentials.expiry_date;
-      const expiresIn = expiryDate
-        ? Math.max(1, Math.floor((expiryDate - Date.now()) / 1000))
-        : 3600;
-      return {
-        access_token: response.token,
-        expires_in: expiresIn,
-      };
-    },
-  };
+function getWorkloadIdentityFirestore(projectId: string, config: WorkloadIdentityConfig) {
+  const cacheKey = [
+    projectId,
+    config.projectNumber,
+    config.serviceAccountEmail,
+    config.poolId,
+    config.providerId,
+  ].join(':');
+  if (workloadIdentityFirestore && workloadIdentityFirestoreKey === cacheKey) {
+    return workloadIdentityFirestore;
+  }
+
+  const authClient = workloadIdentityAuthClient(config);
+  const auth = new GoogleAuth({
+    projectId,
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+    authClient,
+  });
+  workloadIdentityFirestore = new Firestore({
+    projectId,
+    auth,
+  });
+  workloadIdentityFirestoreKey = cacheKey;
+  return workloadIdentityFirestore;
 }
 
 function errorText(error: unknown) {
@@ -311,11 +324,13 @@ export function firestore() {
 
   const serviceAccount = serviceAccountCredentials();
   const workloadIdentity = workloadIdentityConfig();
-  const credential = serviceAccount
-    ? cert(serviceAccount)
-    : workloadIdentity
-      ? workloadIdentityCredential(workloadIdentity)
-      : applicationDefault();
+  if (!serviceAccount && workloadIdentity) {
+    // Firebase Admin의 Firestore 어댑터는 임의 Credential 객체를 거부하므로
+    // OIDC ExternalAccountClient를 Google Cloud Firestore에 직접 전달합니다.
+    return getWorkloadIdentityFirestore(projectId, workloadIdentity);
+  }
+
+  const credential = serviceAccount ? cert(serviceAccount) : applicationDefault();
   const app = getApps()[0] ?? initializeApp({
     projectId,
     credential,
