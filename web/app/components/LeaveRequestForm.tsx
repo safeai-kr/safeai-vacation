@@ -57,10 +57,14 @@ export default function LeaveRequestForm({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ startDate, endDate: duration === 'FULL_DAY' ? endDate : startDate, source, duration, reason }),
       });
-      const result = await response.json() as { error?: string; demo?: boolean };
+      const result = await response.json() as { error?: string; demo?: boolean; slackSent?: boolean };
       if (!response.ok) throw new Error(result.error || '신청을 저장하지 못했습니다.');
       setStatus('success');
-      setMessage(result.demo ? '데모 신청을 확인했습니다. 실제 Firebase에는 저장되지 않았습니다.' : '연차 신청이 등록되었습니다.');
+      setMessage(result.demo
+        ? result.slackSent
+          ? '데모 승인 요청을 Slack으로 전송했습니다. 실제 Firebase에는 저장되지 않았습니다.'
+          : '데모 신청을 확인했습니다. 실제 Firebase에는 저장되지 않았습니다.'
+        : '연차 신청이 등록되었습니다.');
       setReason('');
       router.refresh();
     } catch (error) {

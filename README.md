@@ -131,6 +131,73 @@ openssl rand -hex 32
 
 포상 연차 수정 시 이미 사용했거나 승인 대기로 예약된 일수보다 지급량을 줄일 수 없고, 사용일을 변경된 유효기간 밖으로 이동시킬 수 없습니다. 오래 열린 수정 화면의 값으로 다른 관리자의 변경을 덮어쓰지 못하도록 지급 건 버전도 확인합니다. `잔여 회수`는 사용·예약분을 유지하고 아직 배정되지 않은 일수만 회수하며, 이미 만료된 지급 건은 별도 회수하지 않습니다. 승인·반려·취소 성공 기록은 감사 로그에, 서버 처리 실패는 별도 실패 로그에 저장되며 관리자가 `기록 관리` 탭에서 확인 처리할 수 있습니다.
 
+## Slack·Google Calendar·Gmail 연동
+
+연차 신청이 등록되면 담당 승인자에게 Slack 개인 메시지를 보내고, 메시지의 `승인`·`반려` 버튼으로 기존 웹 승인 로직을 실행합니다. 승인된 신청은 Google Calendar에 종일 일정 하나로 등록하고 지정된 이메일로 승인 내용을 전송합니다.
+
+데모 모드에서는 Firebase 신청 데이터와 잔액을 변경하지 않습니다. 신청 화면에서 입력한 내용은 Slack 메시지의 서명된 버튼 데이터로 전달되며, 데모 수신자는 `paradise@safeai.kr`로 설정합니다. Slack 승인 버튼은 배포된 HTTPS 주소를 호출해야 하므로 Vercel Preview 또는 Production 환경에서 테스트합니다.
+
+### Slack App 설정
+
+기존 Slack App의 `OAuth & Permissions`에서 Bot Token Scopes를 확인합니다.
+
+- `chat:write`: 승인 요청 메시지 전송 및 상태 변경
+- `im:write`: 승인자와 개인 메시지 채널 열기
+- `users:read.email`: `SLACK_DEMO_USER_ID`를 비우고 이메일로 사용자를 찾을 때만 필요
+
+권한을 추가했다면 App을 워크스페이스에 다시 설치합니다. `Interactivity & Shortcuts`를 활성화하고 Request URL을 다음과 같이 등록합니다.
+
+```text
+https://vacation.safeai.kr/api/integrations/slack/actions
+```
+
+로컬 및 Vercel에 다음 환경변수를 등록합니다.
+
+```dotenv
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_SIGNING_SECRET=...
+SLACK_TEAM_ID=T...
+SLACK_DEMO_USER_ID=U...
+LEAVE_DEMO_RECIPIENT_EMAIL=paradise@safeai.kr
+```
+
+`SLACK_BOT_TOKEN`은 Slack App의 `OAuth & Permissions`에 있는 `Bot User OAuth Token`, `SLACK_SIGNING_SECRET`은 `Basic Information`의 `App Credentials`, `SLACK_TEAM_ID`는 Slack 웹 주소 `https://app.slack.com/client/T...`의 `T...` 값입니다. `SLACK_DEMO_USER_ID`는 Slack에서 본인 프로필의 `멤버 ID 복사`로 확인합니다.
+
+### Apps Script Calendar 및 메일 설정
+
+Google API Refresh Token 대신 Apps Script 웹앱이 배포자 권한으로 Google Calendar와 Mail을 사용합니다. Apps Script는 승인 결과만 전달받으며 Sheet와 연차 계산에는 접근하지 않습니다.
+
+1. 새 Apps Script 독립 프로젝트를 만듭니다.
+2. [`google-apps-script/Code.gs`](google-apps-script/Code.gs)의 코드를 붙여 넣습니다.
+3. 프로젝트 설정에서 `appsscript.json` 매니페스트 표시를 활성화한 뒤 [`google-apps-script/appsscript.json`](google-apps-script/appsscript.json)의 내용으로 교체합니다.
+4. 프로젝트 설정의 스크립트 속성에 아래 세 값을 등록합니다.
+
+```text
+INTEGRATION_SHARED_SECRET = openssl rand -hex 32로 생성한 값
+CALENDAR_ID = Google Calendar의 캘린더 ID
+MAIL_RECIPIENTS = paradise@safeai.kr
+```
+
+캘린더 ID는 Google Calendar의 `설정 및 공유 → 캘린더 통합 → 캘린더 ID`에서 확인합니다. Apps Script 소유자 계정은 해당 캘린더를 수정할 권한이 있어야 합니다.
+
+Apps Script 편집기에서 `authorizeServices` 함수를 한 번 실행하고 Calendar와 메일 권한을 허용합니다. 이후 `배포 → 새 배포 → 웹 앱`에서 다음과 같이 배포합니다.
+
+```text
+다음 사용자로 실행: 나
+액세스 권한이 있는 사용자: 모든 사용자
+```
+
+Vercel 서버는 Google 로그인 화면을 통과할 수 없으므로 익명 호출 가능한 웹앱으로 배포합니다. 대신 모든 요청에 5분 유효 HMAC 서명을 적용하고, Apps Script가 서명을 검증한 후에만 Calendar와 메일을 실행합니다.
+
+배포 후 `/exec`으로 끝나는 웹앱 URL과 동일한 공유 비밀키를 Vercel에 등록합니다.
+
+```dotenv
+GOOGLE_APPS_SCRIPT_WEB_APP_URL=https://script.google.com/macros/s/.../exec
+GOOGLE_APPS_SCRIPT_SHARED_SECRET=Apps-Script의-INTEGRATION_SHARED_SECRET과-같은-값
+```
+
+캘린더에는 신청 시작일부터 종료일까지 주말을 포함한 종일 일정 하나를 만들고 제목에는 신청자 이름과 연차 종류만 표시합니다. 승인 메일에는 신청자, 사용 기간, 연차 종류, 상세 사유를 표시합니다. 신청 ID를 기준으로 캘린더 중복 생성과 메일 중복 발송도 방지합니다.
+
 ## Vercel 배포
 
 Vercel 프로젝트의 Root Directory를 `web`으로 지정하고 실제 운영에서는 `LEAVE_DEMO_MODE=false`로 설정합니다.

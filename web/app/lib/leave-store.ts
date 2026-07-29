@@ -17,6 +17,22 @@ export type EmployeeStatus = 'ACTIVE' | 'ON_LEAVE' | 'RESIGNED' | 'INACTIVE';
 export type LeaveSource = 'ANNUAL' | 'REWARD';
 export type LeaveDuration = 'FULL_DAY' | 'AM_HALF' | 'PM_HALF';
 
+export interface LeaveIntegrationRequest {
+  requestId: string;
+  applicantEmail: string;
+  applicantName: string;
+  approverEmail: string;
+  approverSlackUserId: string;
+  source: LeaveSource;
+  duration: LeaveDuration;
+  startDate: string;
+  endDate: string;
+  days: number;
+  reason: string;
+  slackChannelId?: string;
+  slackMessageTs?: string;
+}
+
 export interface Employee {
   email: string;
   name: string;
@@ -1355,6 +1371,28 @@ function allocationPlan(grants: RewardGrant[], allocations: RewardAllocation[], 
   return plan;
 }
 
+function integrationRequestFromData(
+  requestId: string,
+  data: FirebaseFirestore.DocumentData,
+): LeaveIntegrationRequest {
+  const request = parseRequest(requestId, data);
+  return {
+    requestId,
+    applicantEmail: request.applicantEmail,
+    applicantName: request.applicantName,
+    approverEmail: request.approverEmail,
+    approverSlackUserId: String(data.approverSlackUserId ?? ''),
+    source: request.source,
+    duration: request.duration,
+    startDate: request.startDate,
+    endDate: request.endDate,
+    days: request.days,
+    reason: request.reason,
+    slackChannelId: String(data.slackChannelId ?? ''),
+    slackMessageTs: String(data.slackMessageTs ?? ''),
+  };
+}
+
 export async function createLeaveRequest(actor: { email: string; name: string }, input: NewLeaveRequestInput) {
   const db = firestore();
   const email = normalizedEmail(actor.email);
@@ -1367,6 +1405,7 @@ export async function createLeaveRequest(actor: { email: string; name: string },
   const ref = db.collection('leave_requests').doc();
   const auditRef = db.collection('audit_logs').doc(ledgerId(`CREATE_REQUEST:${ref.id}`));
   let autoApproved = false;
+  let integrationRequest: LeaveIntegrationRequest | null = null;
 
   await db.runTransaction(async transaction => {
     const [applicantSnapshot, employeeDirectory] = await Promise.all([
@@ -1421,7 +1460,7 @@ export async function createLeaveRequest(actor: { email: string; name: string },
       rewardPlan = allocationPlan(grants, allocations, dates, input.duration === 'FULL_DAY' ? 1 : 0.5);
     }
 
-    transaction.create(ref, {
+    const requestData = {
       applicantEmail: email,
       applicantName: currentEmployee.name || actor.name,
       approverEmail,
@@ -1438,7 +1477,21 @@ export async function createLeaveRequest(actor: { email: string; name: string },
       createdAt: FieldValue.serverTimestamp(),
       decidedAt: autoApproved ? FieldValue.serverTimestamp() : null,
       cancelledAt: null,
-    });
+    };
+    transaction.create(ref, requestData);
+    integrationRequest = {
+      requestId: ref.id,
+      applicantEmail: email,
+      applicantName: currentEmployee.name || actor.name,
+      approverEmail,
+      approverSlackUserId: String(approverSnapshot.data()?.slackUserId ?? ''),
+      source: input.source,
+      duration: input.duration,
+      startDate: input.startDate,
+      endDate: input.duration === 'FULL_DAY' ? input.endDate : input.startDate,
+      days,
+      reason: input.reason.trim(),
+    };
 
     if (input.source === 'ANNUAL' && autoApproved) {
       transaction.create(db.collection('leave_ledger').doc(ledgerId(`USE:${ref.id}`)), {
@@ -1471,7 +1524,9 @@ export async function createLeaveRequest(actor: { email: string; name: string },
       createdAt: FieldValue.serverTimestamp(),
     });
   });
-  return { requestId: ref.id, autoApproved };
+  const completedIntegrationRequest = integrationRequest as LeaveIntegrationRequest | null;
+  if (!completedIntegrationRequest) throw new Error('연차 신청 연동 정보를 만들지 못했습니다.');
+  return { requestId: ref.id, autoApproved, integrationRequest: completedIntegrationRequest };
 }
 
 export async function decideLeaveRequest(requestId: string, actorEmail: string, action: 'approve' | 'reject') {
@@ -1480,6 +1535,7 @@ export async function decideLeaveRequest(requestId: string, actorEmail: string, 
   const ref = db.collection('leave_requests').doc(requestId);
   const actorRef = db.collection('employees').doc(email);
   const auditRef = db.collection('audit_logs').doc(ledgerId(`DECIDE_REQUEST:${requestId}`));
+  let integrationRequest: LeaveIntegrationRequest | null = null;
   await db.runTransaction(async transaction => {
     const [requestDoc, actorDoc] = await Promise.all([
       transaction.get(ref),
@@ -1557,8 +1613,50 @@ export async function decideLeaveRequest(requestId: string, actorEmail: string, 
       after: { status: action === 'approve' ? 'APPROVED' : 'REJECTED' },
       createdAt: FieldValue.serverTimestamp(),
     });
+    integrationRequest = {
+      ...integrationRequestFromData(requestId, requestDoc.data() ?? {}),
+    };
   });
-  return { status: action === 'approve' ? 'APPROVED' : 'REJECTED' };
+  const completedIntegrationRequest = integrationRequest as LeaveIntegrationRequest | null;
+  if (!completedIntegrationRequest) throw new Error('연차 승인 연동 정보를 만들지 못했습니다.');
+  return {
+    status: action === 'approve' ? 'APPROVED' : 'REJECTED',
+    integrationRequest: completedIntegrationRequest,
+  };
+}
+
+export async function employeeEmailForSlackUser(slackUserId: string) {
+  const normalizedSlackUserId = slackUserId.trim();
+  if (!normalizedSlackUserId) throw new Error('Slack 사용자 ID를 확인할 수 없습니다.');
+  const snapshot = await firestore()
+    .collection('employees')
+    .where('slackUserId', '==', normalizedSlackUserId)
+    .limit(2)
+    .get();
+  if (snapshot.size !== 1) {
+    throw new Error(snapshot.empty
+      ? 'Slack 사용자 ID와 연결된 직원을 찾을 수 없습니다.'
+      : '동일한 Slack 사용자 ID가 여러 직원에게 등록되어 있습니다.');
+  }
+  const employee = parseEmployee({
+    ...snapshot.docs[0].data(),
+    email: snapshot.docs[0].data().email || snapshot.docs[0].id,
+  });
+  if (!employee.active || employee.profileStatus !== 'COMPLETE') {
+    throw new Error('등록이 완료된 활성 사내 승인자만 처리할 수 있습니다.');
+  }
+  return employee.email;
+}
+
+export async function saveLeaveRequestSlackReference(
+  requestId: string,
+  input: { channelId: string; messageTs: string },
+) {
+  await firestore().collection('leave_requests').doc(requestId).update({
+    slackChannelId: input.channelId,
+    slackMessageTs: input.messageTs,
+    slackSentAt: FieldValue.serverTimestamp(),
+  });
 }
 
 export async function cancelLeaveRequest(requestId: string, actorEmail: string) {
