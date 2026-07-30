@@ -26,6 +26,7 @@ const OPERATION_LABELS: Record<string, string> = {
   RECLAIM_REWARD_LEAVE: '포상 연차 회수',
   SYNC_ANNUAL_GRANTS: '연차 자동 계산',
   DASHBOARD_LOAD: '연차 화면 조회',
+  DELETE_CALENDAR_EVENT: '캘린더 일정 삭제',
 };
 
 const SOURCE_LABELS: Record<LeaveSource, string> = { ANNUAL: '정기 연차', REWARD: '포상휴가' };

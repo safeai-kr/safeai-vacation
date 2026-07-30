@@ -1,5 +1,6 @@
 /**
- * 연차 웹앱에서 승인된 신청을 받아 Google Calendar와 메일에 반영합니다.
+ * 연차 웹앱에서 승인 또는 취소된 신청을 받아 Google Calendar와 메일에 반영하고,
+ * 매일 시작되는 연차를 지정된 Slack 채널에 알립니다.
  * 연차 계산과 승인 판단은 하지 않으며, 서명된 요청만 처리합니다.
  */
 function doPost(e) {
@@ -11,17 +12,25 @@ function doPost(e) {
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
     try {
-      const result = {
-        calendar: runOperation(function () {
-          return upsertCalendarEvent(data);
-        }),
-        email: runOperation(function () {
-          return sendApprovalEmailOnce(data);
-        }),
-      };
+      const result = data.action === 'CANCEL'
+        ? {
+            calendar: runOperation(function () {
+              return deleteCalendarEvent(data);
+            }),
+          }
+        : {
+            calendar: runOperation(function () {
+              return upsertCalendarEvent(data);
+            }),
+            email: runOperation(function () {
+              return sendApprovalEmailOnce(data);
+            }),
+          };
 
       return jsonResponse({
-        ok: result.calendar.ok && result.email.ok,
+        ok: Object.keys(result).every(function (key) {
+          return result[key].ok;
+        }),
         result: result,
       });
     } finally {
@@ -44,14 +53,105 @@ function doGet() {
 }
 
 /**
- * 배포 전에 편집기에서 한 번 실행해 Calendar와 Mail 권한을 승인합니다.
+ * 배포 전에 편집기에서 한 번 실행해 Calendar, Mail, Slack 호출 권한을 승인합니다.
  */
 function authorizeServices() {
   const calendarId = requiredProperty('CALENDAR_ID');
   const calendar = CalendarApp.getCalendarById(calendarId);
   if (!calendar) throw new Error('CALENDAR_ID에 해당하는 캘린더를 찾을 수 없습니다.');
   MailApp.getRemainingDailyQuota();
-  console.log('Calendar와 Mail 권한이 확인되었습니다.');
+  validateSlackConnection();
+  ScriptApp.getProjectTriggers();
+  console.log('Calendar, Mail, Slack 호출과 트리거 관리 권한이 확인되었습니다.');
+}
+
+/**
+ * 매일 오전 9시대에 실행되는 연차 시작 알림 트리거를 설치합니다.
+ * SLACK_DAILY_NOTICE_HOUR 속성으로 실행 시간대(0~23시)를 변경할 수 있습니다.
+ */
+function installDailyLeaveNotificationTrigger() {
+  const handler = 'sendTodayLeaveNotifications';
+  const configuredHour = PropertiesService
+    .getScriptProperties()
+    .getProperty('SLACK_DAILY_NOTICE_HOUR') || '9';
+  const hour = Number(configuredHour);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+    throw new Error('SLACK_DAILY_NOTICE_HOUR는 0부터 23 사이의 정수여야 합니다.');
+  }
+
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (trigger.getHandlerFunction() === handler) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  const trigger = ScriptApp
+    .newTrigger(handler)
+    .timeBased()
+    .atHour(hour)
+    .everyDays(1)
+    .inTimezone('Asia/Seoul')
+    .create();
+  console.log('연차 시작 알림 트리거를 설치했습니다: ' + trigger.getUniqueId());
+}
+
+/**
+ * 오늘 시작하는 연차를 찾아 지정된 Slack 채널에 한 번씩 알립니다.
+ * 트리거뿐 아니라 편집기에서 직접 실행해 테스트할 수도 있습니다.
+ */
+function sendTodayLeaveNotifications() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    const calendar = CalendarApp.getCalendarById(requiredProperty('CALENDAR_ID'));
+    if (!calendar) throw new Error('설정된 Google Calendar를 찾을 수 없습니다.');
+
+    const timeZone = 'Asia/Seoul';
+    const today = Utilities.formatDate(new Date(), timeZone, 'yyyy-MM-dd');
+    const todayDate = parseDate(today);
+    const stateKey = 'SLACK_START_NOTICES_' + today;
+    const sentRequestIds = parseStringArray(properties.getProperty(stateKey));
+
+    calendar.getEventsForDay(todayDate).forEach(function (event) {
+      if (!event.isAllDayEvent()) return;
+      const eventStartDate = Utilities.formatDate(
+        event.getAllDayStartDate(),
+        timeZone,
+        'yyyy-MM-dd'
+      );
+      if (eventStartDate !== today) return;
+
+      const requestId = event.getTag('leaveRequestId');
+      if (!requestId || sentRequestIds.indexOf(requestId) >= 0) return;
+
+      const applicantName = event.getTag('applicantName')
+        || event.getTitle().split(' · ')[0].trim();
+      const startDate = event.getTag('leaveStartDate') || eventStartDate;
+      const endDate = event.getTag('leaveEndDate') || inclusiveAllDayEndDate(event, timeZone);
+      const message = [
+        applicantName + '님이 연차를 사용했습니다.',
+        '기간: ' + startDate + ' ~ ' + endDate,
+      ].join('\n');
+
+      postSlackChannelMessage(message);
+      sentRequestIds.push(requestId);
+      properties.setProperty(stateKey, JSON.stringify(sentRequestIds));
+    });
+
+    deleteExpiredSlackNoticeState(properties, todayDate);
+    console.log('오늘 시작하는 연차 알림 처리를 완료했습니다: ' + sentRequestIds.length + '건');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * 실제 설정된 채널에 테스트 메시지를 한 번 보냅니다.
+ */
+function testSlackChannelNotification() {
+  validateSlackConnection();
+  postSlackChannelMessage('연차 시작 알림 연결 테스트입니다.');
 }
 
 function verifyAndParseRequest(envelope) {
@@ -80,6 +180,9 @@ function verifyAndParseRequest(envelope) {
 }
 
 function validateRequestData(data) {
+  if (data.action !== 'APPROVE' && data.action !== 'CANCEL') {
+    throw new Error('지원하지 않는 연동 작업입니다.');
+  }
   const requiredStrings = [
     'requestId',
     'applicantName',
@@ -133,7 +236,10 @@ function upsertCalendarEvent(data) {
     event
       .setTitle(title)
       .setAllDayDates(startDate, endDateExclusive)
-      .setTag('leaveRequestId', data.requestId);
+      .setTag('leaveRequestId', data.requestId)
+      .setTag('applicantName', data.applicantName)
+      .setTag('leaveStartDate', data.startDate)
+      .setTag('leaveEndDate', data.endDate);
     properties.setProperty(stateKey, event.getId());
     return {
       ok: true,
@@ -143,12 +249,55 @@ function upsertCalendarEvent(data) {
   }
 
   event = calendar.createAllDayEvent(title, startDate, endDateExclusive);
-  event.setTag('leaveRequestId', data.requestId);
+  event
+    .setTag('leaveRequestId', data.requestId)
+    .setTag('applicantName', data.applicantName)
+    .setTag('leaveStartDate', data.startDate)
+    .setTag('leaveEndDate', data.endDate);
   properties.setProperty(stateKey, event.getId());
   return {
     ok: true,
     created: true,
     eventId: event.getId(),
+  };
+}
+
+function deleteCalendarEvent(data) {
+  const properties = PropertiesService.getScriptProperties();
+  const calendar = CalendarApp.getCalendarById(requiredProperty('CALENDAR_ID'));
+  if (!calendar) throw new Error('설정된 Google Calendar를 찾을 수 없습니다.');
+
+  const stateKey = integrationStateKey('CALENDAR_EVENT', data.requestId);
+  const savedEventId = properties.getProperty(stateKey);
+  let event = savedEventId ? calendar.getEventById(savedEventId) : null;
+
+  if (!event) {
+    const startDate = parseDate(data.startDate);
+    const endDateExclusive = parseDate(data.endDate);
+    endDateExclusive.setDate(endDateExclusive.getDate() + 1);
+    event = calendar
+      .getEvents(startDate, endDateExclusive)
+      .find(function (candidate) {
+        return candidate.getTag('leaveRequestId') === data.requestId;
+      }) || null;
+  }
+
+  if (!event) {
+    properties.deleteProperty(stateKey);
+    return {
+      ok: true,
+      deleted: false,
+      alreadyDeleted: true,
+    };
+  }
+
+  const eventId = event.getId();
+  event.deleteEvent();
+  properties.deleteProperty(stateKey);
+  return {
+    ok: true,
+    deleted: true,
+    eventId: eventId,
   };
 }
 
@@ -181,13 +330,90 @@ function sendApprovalEmailOnce(data) {
     to: recipients,
     subject: '[연차 승인] ' + data.applicantName + ' · ' + period,
     body: body,
-    name: '연차 관리 시스템',
+    name: 'SafeAI 연차봇',
+    noReply: true,
   });
   properties.setProperty(stateKey, new Date().toISOString());
   return {
     ok: true,
     sent: true,
   };
+}
+
+function validateSlackConnection() {
+  const response = slackApi('auth.test', {});
+  if (!response.team_id) throw new Error('Slack 워크스페이스 정보를 확인하지 못했습니다.');
+  return response;
+}
+
+function postSlackChannelMessage(text) {
+  const response = slackApi('chat.postMessage', {
+    channel: requiredProperty('SLACK_NOTIFICATION_CHANNEL_ID'),
+    text: text,
+    unfurl_links: false,
+    unfurl_media: false,
+  });
+  if (!response.ts) throw new Error('Slack 메시지 식별값을 받지 못했습니다.');
+  return response;
+}
+
+function slackApi(method, payload) {
+  const response = UrlFetchApp.fetch('https://slack.com/api/' + method, {
+    method: 'post',
+    contentType: 'application/json; charset=utf-8',
+    headers: {
+      Authorization: 'Bearer ' + requiredProperty('SLACK_BOT_TOKEN'),
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+  const statusCode = response.getResponseCode();
+  let result;
+  try {
+    result = JSON.parse(response.getContentText());
+  } catch (error) {
+    throw new Error('Slack 응답 형식이 올바르지 않습니다. HTTP ' + statusCode);
+  }
+  if (!result.ok) {
+    throw new Error('Slack API 오류: ' + (result.error || 'HTTP ' + statusCode));
+  }
+  return result;
+}
+
+function inclusiveAllDayEndDate(event, timeZone) {
+  const endDate = event.getAllDayEndDate();
+  endDate.setDate(endDate.getDate() - 1);
+  return Utilities.formatDate(endDate, timeZone, 'yyyy-MM-dd');
+}
+
+function parseStringArray(value) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter(function (item) {
+          return typeof item === 'string';
+        })
+      : [];
+  } catch (error) {
+    console.warn('Slack 알림 상태값을 읽지 못해 초기화합니다.');
+    return [];
+  }
+}
+
+function deleteExpiredSlackNoticeState(properties, todayDate) {
+  const expirationDate = new Date(todayDate);
+  expirationDate.setDate(expirationDate.getDate() - 31);
+  const expirationKey = Utilities.formatDate(expirationDate, 'Asia/Seoul', 'yyyy-MM-dd');
+  const prefix = 'SLACK_START_NOTICES_';
+  const allProperties = properties.getProperties();
+  Object.keys(allProperties).forEach(function (key) {
+    if (key.indexOf(prefix) !== 0) return;
+    const date = key.slice(prefix.length);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date) && date < expirationKey) {
+      properties.deleteProperty(key);
+    }
+  });
 }
 
 function runOperation(callback) {

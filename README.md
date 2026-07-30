@@ -32,7 +32,7 @@ npm install
 npm run dev
 ```
 
-`LEAVE_DEMO_MODE=true`에서는 실제 Firebase에 저장하지 않습니다.
+`LEAVE_DEMO_MODE=true`에서는 실제 Firebase에 저장하지 않습니다. `npm run dev`로 실행한 로컬 데모 화면의 헤더에는 `관리자`, `팀장`, `일반 직원` 역할 선택기가 표시됩니다. 선택한 역할에 따라 사용 가능한 탭, 승인 대상, 포상 연차 지급 범위와 개인 잔여 연차가 함께 변경됩니다. 이 역할 선택기는 개발 서버에서만 활성화되며 Vercel을 포함한 운영 빌드에는 표시되지 않습니다.
 
 로컬에서 실제 Firebase를 사용하면서 Google 로그인을 생략하려면 다음 값을 사용합니다. 이 우회는 개발 서버에서만 작동하며 운영 빌드에서는 무시됩니다.
 
@@ -133,7 +133,7 @@ openssl rand -hex 32
 
 ## Slack·Google Calendar·Gmail 연동
 
-연차 신청이 등록되면 담당 승인자에게 Slack 개인 메시지를 보내고, 메시지의 `승인`·`반려` 버튼으로 기존 웹 승인 로직을 실행합니다. 승인된 신청은 Google Calendar에 종일 일정 하나로 등록하고 지정된 이메일로 승인 내용을 전송합니다.
+연차 신청이 등록되면 담당 승인자에게 Slack 개인 메시지를 보내고, 메시지의 `승인`·`반려` 버튼으로 기존 웹 승인 로직을 실행합니다. 승인된 신청은 Google Calendar에 종일 일정 하나로 등록하고 지정된 이메일로 승인 내용을 전송합니다. 승인된 신청을 취소하면 신청 ID로 기존 캘린더 일정을 찾아 삭제하며 취소 메일은 발송하지 않습니다. 승인 대기 상태에서 취소한 신청은 외부 연동을 호출하지 않습니다.
 
 데모 모드에서는 Firebase 신청 데이터와 잔액을 변경하지 않습니다. 신청 화면에서 입력한 내용은 Slack 메시지의 서명된 버튼 데이터로 전달되며, 데모 수신자는 `paradise@safeai.kr`로 설정합니다. Slack 승인 버튼은 배포된 HTTPS 주소를 호출해야 하므로 Vercel Preview 또는 Production 환경에서 테스트합니다.
 
@@ -163,24 +163,27 @@ LEAVE_DEMO_RECIPIENT_EMAIL=paradise@safeai.kr
 
 `SLACK_BOT_TOKEN`은 Slack App의 `OAuth & Permissions`에 있는 `Bot User OAuth Token`, `SLACK_SIGNING_SECRET`은 `Basic Information`의 `App Credentials`, `SLACK_TEAM_ID`는 Slack 웹 주소 `https://app.slack.com/client/T...`의 `T...` 값입니다. `SLACK_DEMO_USER_ID`는 Slack에서 본인 프로필의 `멤버 ID 복사`로 확인합니다.
 
-### Apps Script Calendar 및 메일 설정
+### Apps Script Calendar·메일·연차 시작 Slack 알림 설정
 
-Google API Refresh Token 대신 Apps Script 웹앱이 배포자 권한으로 Google Calendar와 Mail을 사용합니다. Apps Script는 승인 결과만 전달받으며 Sheet와 연차 계산에는 접근하지 않습니다.
+Google API Refresh Token 대신 Apps Script 웹앱이 배포자 권한으로 Google Calendar와 Mail을 사용합니다. Apps Script는 승인 결과만 전달받으며 Sheet와 연차 계산에는 접근하지 않습니다. 매일 오전에는 캘린더에서 당일 시작하는 연차를 찾아 지정된 Slack 채널에 알립니다.
 
 1. 새 Apps Script 독립 프로젝트를 만듭니다.
 2. [`google-apps-script/Code.gs`](google-apps-script/Code.gs)의 코드를 붙여 넣습니다.
 3. 프로젝트 설정에서 `appsscript.json` 매니페스트 표시를 활성화한 뒤 [`google-apps-script/appsscript.json`](google-apps-script/appsscript.json)의 내용으로 교체합니다.
-4. 프로젝트 설정의 스크립트 속성에 아래 세 값을 등록합니다.
+4. 프로젝트 설정의 스크립트 속성에 아래 값을 등록합니다.
 
 ```text
 INTEGRATION_SHARED_SECRET = openssl rand -hex 32로 생성한 값
 CALENDAR_ID = Google Calendar의 캘린더 ID
 MAIL_RECIPIENTS = paradise@safeai.kr
+SLACK_BOT_TOKEN = xoxb-로 시작하는 기존 Bot User OAuth Token
+SLACK_NOTIFICATION_CHANNEL_ID = 알림을 받을 Slack 채널 ID
+SLACK_DAILY_NOTICE_HOUR = 9
 ```
 
-캘린더 ID는 Google Calendar의 `설정 및 공유 → 캘린더 통합 → 캘린더 ID`에서 확인합니다. Apps Script 소유자 계정은 해당 캘린더를 수정할 권한이 있어야 합니다.
+캘린더 ID는 Google Calendar의 `설정 및 공유 → 캘린더 통합 → 캘린더 ID`에서 확인합니다. Apps Script 소유자 계정은 해당 캘린더를 수정할 권한이 있어야 합니다. `SLACK_NOTIFICATION_CHANNEL_ID`는 Slack 채널 상세 화면에서 `채널 ID 복사`로 확인하며, 기존 봇을 해당 채널에 초대해야 합니다. `SLACK_DAILY_NOTICE_HOUR`를 생략하면 오전 9시로 설정됩니다.
 
-Apps Script 편집기에서 `authorizeServices` 함수를 한 번 실행하고 Calendar와 메일 권한을 허용합니다. 이후 `배포 → 새 배포 → 웹 앱`에서 다음과 같이 배포합니다.
+Apps Script 편집기에서 `authorizeServices` 함수를 한 번 실행하고 Calendar, 메일, 외부 요청, 트리거 관리 권한을 허용합니다. `testSlackChannelNotification`을 실행해 지정 채널에 테스트 메시지가 도착하는지 확인한 다음 `installDailyLeaveNotificationTrigger`를 한 번 실행합니다. 이 함수는 기존 동일 알림 트리거를 제거하고 매일 오전 9시대에 실행되는 트리거 하나를 생성합니다. 이후 `배포 → 새 배포 → 웹 앱`에서 다음과 같이 배포합니다.
 
 ```text
 다음 사용자로 실행: 나
@@ -196,7 +199,14 @@ GOOGLE_APPS_SCRIPT_WEB_APP_URL=https://script.google.com/macros/s/.../exec
 GOOGLE_APPS_SCRIPT_SHARED_SECRET=Apps-Script의-INTEGRATION_SHARED_SECRET과-같은-값
 ```
 
-캘린더에는 신청 시작일부터 종료일까지 주말을 포함한 종일 일정 하나를 만들고 제목에는 신청자 이름과 연차 종류만 표시합니다. 승인 메일에는 신청자, 사용 기간, 연차 종류, 상세 사유를 표시합니다. 신청 ID를 기준으로 캘린더 중복 생성과 메일 중복 발송도 방지합니다.
+캘린더에는 신청 시작일부터 종료일까지 주말을 포함한 종일 일정 하나를 만들고 제목에는 신청자 이름과 연차 종류만 표시합니다. 승인 메일에는 신청자, 사용 기간, 연차 종류, 상세 사유를 표시하며 Google Workspace의 `no-reply` 주소와 `SafeAI 연차봇` 표시 이름으로 발송합니다. 신청 ID를 기준으로 캘린더 중복 생성과 메일 중복 발송도 방지합니다.
+
+연차 시작일에는 지정 채널에 다음 형식으로 신청별 메시지를 보냅니다. 같은 신청은 트리거가 재실행되어도 하루에 한 번만 전송하며, 취소되어 캘린더에서 삭제된 연차는 전송하지 않습니다.
+
+```text
+유동연님이 연차를 사용했습니다.
+기간: 2026-07-20 ~ 2026-07-20
+```
 
 ## Vercel 배포
 

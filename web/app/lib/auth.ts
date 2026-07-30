@@ -3,6 +3,7 @@ import 'server-only';
 import crypto from 'crypto';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { DEMO_ROLES, type DemoRole, isDemoRole } from './demo-roles';
 
 export interface SessionUser {
   email: string;
@@ -14,6 +15,7 @@ export interface SessionUser {
 
 const SESSION_COOKIE = 'leave_portal_session';
 const SESSION_TTL_SECONDS = 8 * 60 * 60;
+export const DEMO_ROLE_COOKIE = 'leave_demo_role';
 
 export function isDemoMode() {
   return process.env.LEAVE_DEMO_MODE === 'true';
@@ -21,6 +23,10 @@ export function isDemoMode() {
 
 export function isLocalAuthBypass() {
   return process.env.NODE_ENV !== 'production' && process.env.LOCAL_AUTH_BYPASS === 'true';
+}
+
+export function isLocalDemoRoleSwitchEnabled() {
+  return process.env.NODE_ENV !== 'production' && isDemoMode();
 }
 
 function localUser(): SessionUser {
@@ -37,10 +43,11 @@ function localUser(): SessionUser {
   };
 }
 
-function demoUser(): SessionUser {
+function demoUser(role: DemoRole): SessionUser {
+  const profile = DEMO_ROLES[role];
   return {
-    email: 'ceo@safeai.kr',
-    name: '김대표',
+    email: profile.email,
+    name: profile.name,
     picture: '',
     hd: process.env.GOOGLE_AUTH_DOMAIN ?? 'safeai.kr',
     exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
@@ -86,7 +93,12 @@ export function createSessionToken(user: Omit<SessionUser, 'exp'>) {
 }
 
 export async function getSession(): Promise<SessionUser | null> {
-  if (isDemoMode()) return demoUser();
+  if (isDemoMode()) {
+    const configuredRole = isLocalDemoRoleSwitchEnabled()
+      ? (await cookies()).get(DEMO_ROLE_COOKIE)?.value
+      : undefined;
+    return demoUser(isDemoRole(configuredRole) ? configuredRole : 'admin');
+  }
   if (isLocalAuthBypass()) return localUser();
 
   const cookieStore = await cookies();

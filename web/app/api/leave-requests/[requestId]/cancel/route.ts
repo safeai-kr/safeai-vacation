@@ -1,6 +1,7 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { after, NextRequest, NextResponse } from 'next/server';
 import { apiErrorResponse } from '../../../../lib/api-error';
 import { getApiSession, isDemoMode, isSameOriginRequest } from '../../../../lib/auth';
+import { runCancelledLeaveIntegration } from '../../../../lib/leave-integrations';
 import { cancelLeaveRequest, recordOperationFailure } from '../../../../lib/leave-store';
 
 export async function POST(
@@ -17,7 +18,26 @@ export async function POST(
 
   try {
     const result = await cancelLeaveRequest(requestId, session.email);
-    return NextResponse.json({ ok: true, ...result });
+    if (!result.alreadyCancelled && result.cancelledFromStatus === 'APPROVED') {
+      after(async () => {
+        const calendar = await runCancelledLeaveIntegration(result.integrationRequest, false);
+        if (calendar.status === 'rejected') {
+          await recordOperationFailure({
+            actorEmail: session.email,
+            operation: 'DELETE_CALENDAR_EVENT',
+            targetType: 'LEAVE_REQUEST',
+            targetId: requestId,
+            error: calendar.reason,
+          });
+        }
+      });
+    }
+    return NextResponse.json({
+      ok: true,
+      status: result.status,
+      balanceRestored: result.balanceRestored,
+      alreadyCancelled: result.alreadyCancelled,
+    });
   } catch (error) {
     await recordOperationFailure({ actorEmail: session.email, operation: 'CANCEL_REQUEST', targetType: 'LEAVE_REQUEST', targetId: requestId, error });
     const { message, expected } = apiErrorResponse(error, '신청을 취소하지 못했습니다. 관리자에게 문의해 주세요.');

@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import { headers } from 'next/headers';
-import { getSession, isDemoMode } from './lib/auth';
+import DemoRoleSwitcher from './components/DemoRoleSwitcher';
+import { getSession, isDemoMode, isLocalDemoRoleSwitchEnabled } from './lib/auth';
+import { demoRoleForEmail } from './lib/demo-roles';
 import './globals.css';
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -22,6 +24,7 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const session = await getSession();
   const demo = isDemoMode();
+  const localDemoRoleSwitch = isLocalDemoRoleSwitchEnabled();
 
   return (
     <html lang="ko">
@@ -37,6 +40,12 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             </a>
 
             <div className="header-actions">
+              {session && localDemoRoleSwitch && (
+                <DemoRoleSwitcher
+                  key={session.email}
+                  currentRole={demoRoleForEmail(session.email)}
+                />
+              )}
               {demo && <span className="demo-badge">데모 모드</span>}
               {session && (
                 <div className="hidden text-right sm:block">

@@ -1797,6 +1797,8 @@ export async function cancelLeaveRequest(requestId: string, actorEmail: string) 
       status: 'CANCELLED' as const,
       balanceRestored: balanceWillRestore,
       alreadyCancelled: false,
+      cancelledFromStatus: current.status,
+      integrationRequest: integrationRequestFromData(requestId, requestData),
     };
   });
 }

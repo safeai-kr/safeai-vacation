@@ -67,6 +67,8 @@ export type ApprovalIntegrationResult = {
   email: PromiseSettledResult<void>;
 };
 
+type AppsScriptAction = 'APPROVE' | 'CANCEL';
+
 const SOURCE_LABEL: Record<LeaveSource, string> = {
   ANNUAL: '정기 연차',
   REWARD: '포상휴가',
@@ -100,10 +102,6 @@ function safeEqual(a: string, b: string) {
 
 function escapeSlackText(value: string) {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function formatDays(days: number) {
-  return Number.isInteger(days) ? String(days) : days.toFixed(1);
 }
 
 export function leaveTypeLabel(request: Pick<LeaveIntegrationRequest, 'source' | 'duration'>) {
@@ -191,22 +189,22 @@ function slackRequestBlocks(request: LeaveIntegrationRequest, actionValue: strin
   const reason = request.reason || '-';
   return [
     {
-      type: 'header',
-      text: { type: 'plain_text', text: '연차 승인 요청', emoji: true },
-    },
-    {
-      type: 'section',
-      fields: [
-        { type: 'mrkdwn', text: `*신청자*\n${escapeSlackText(request.applicantName)}` },
-        { type: 'mrkdwn', text: `*연차 종류*\n${escapeSlackText(leaveTypeLabel(request))}` },
-        { type: 'mrkdwn', text: `*기간*\n${escapeSlackText(periodLabel(request))}` },
-        { type: 'mrkdwn', text: `*사용 일수*\n${formatDays(request.days)}일` },
-      ],
-    },
-    {
       type: 'section',
       block_id: 'leave_reason',
-      text: { type: 'plain_text', text: `상세 사유\n${reason}`, emoji: true },
+      text: {
+        type: 'plain_text',
+        text: [
+          '휴가 사용 요청이 있습니다.',
+          '',
+          `요청자: ${request.applicantName}`,
+          `기간: ${request.startDate} ~ ${request.endDate}`,
+          `종류: ${leaveTypeLabel(request)}`,
+          `사유: ${reason}`,
+          '',
+          '승인하시겠습니까?',
+        ].join('\n'),
+        emoji: true,
+      },
     },
     {
       type: 'actions',
@@ -264,7 +262,15 @@ export async function sendLeaveRequestSlackNotification(request: LeaveIntegratio
 
 export function slackReasonFromPayload(payload: SlackBlockActionPayload) {
   const text = payload.message?.blocks?.find(block => block.block_id === 'leave_reason')?.text?.text ?? '';
-  return text.startsWith('상세 사유\n') ? text.slice('상세 사유\n'.length) : text;
+  const reasonPrefix = '사유: ';
+  const promptSuffix = '\n\n승인하시겠습니까?';
+  const reasonStart = text.indexOf(reasonPrefix);
+  const reasonEnd = text.lastIndexOf(promptSuffix);
+  if (reasonStart < 0) return '';
+  return text.slice(
+    reasonStart + reasonPrefix.length,
+    reasonEnd > reasonStart ? reasonEnd : undefined,
+  );
 }
 
 export async function updateSlackDecisionMessage(input: {
@@ -321,11 +327,13 @@ function settledOperation(
   return operation?.ok ? fulfilled() : rejected(operation?.error || fallbackMessage);
 }
 
-export async function runApprovedLeaveIntegrations(
+async function callAppsScript(
   request: LeaveIntegrationRequest,
   demo: boolean,
-): Promise<ApprovalIntegrationResult> {
+  action: AppsScriptAction,
+): Promise<NonNullable<AppsScriptBridgeResponse['result']>> {
   const payload = JSON.stringify({
+    action,
     timestamp: Date.now(),
     requestId: request.requestId,
     applicantEmail: request.applicantEmail,
@@ -352,11 +360,7 @@ export async function runApprovedLeaveIntegrations(
       signal: AbortSignal.timeout(25_000),
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Apps Script 호출에 실패했습니다.';
-    return {
-      calendar: rejected(`Apps Script 캘린더 호출 실패: ${message}`),
-      email: rejected(`Apps Script 메일 호출 실패: ${message}`),
-    };
+    throw new Error(error instanceof Error ? error.message : 'Apps Script 호출에 실패했습니다.');
   }
 
   const responseText = await response.text();
@@ -364,19 +368,47 @@ export async function runApprovedLeaveIntegrations(
   try {
     result = JSON.parse(responseText) as AppsScriptBridgeResponse;
   } catch {
-    const message = `Apps Script 응답 형식이 올바르지 않습니다. HTTP ${response.status}`;
-    return { calendar: rejected(message), email: rejected(message) };
+    throw new Error(`Apps Script 응답 형식이 올바르지 않습니다. HTTP ${response.status}`);
   }
 
   if (!result.result) {
-    const message = result.error || `Apps Script 호출 실패: HTTP ${response.status}`;
-    return { calendar: rejected(message), email: rejected(message) };
+    throw new Error(result.error || `Apps Script 호출 실패: HTTP ${response.status}`);
+  }
+  return result.result;
+}
+
+export async function runApprovedLeaveIntegrations(
+  request: LeaveIntegrationRequest,
+  demo: boolean,
+): Promise<ApprovalIntegrationResult> {
+  let result: NonNullable<AppsScriptBridgeResponse['result']>;
+  try {
+    result = await callAppsScript(request, demo, 'APPROVE');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Apps Script 호출에 실패했습니다.';
+    return {
+      calendar: rejected(`Apps Script 캘린더 호출 실패: ${message}`),
+      email: rejected(`Apps Script 메일 호출 실패: ${message}`),
+    };
   }
 
   return {
-    calendar: settledOperation(result.result.calendar, 'Apps Script 캘린더 등록에 실패했습니다.'),
-    email: settledOperation(result.result.email, 'Apps Script 메일 발송에 실패했습니다.'),
+    calendar: settledOperation(result.calendar, 'Apps Script 캘린더 등록에 실패했습니다.'),
+    email: settledOperation(result.email, 'Apps Script 메일 발송에 실패했습니다.'),
   };
+}
+
+export async function runCancelledLeaveIntegration(
+  request: LeaveIntegrationRequest,
+  demo: boolean,
+): Promise<PromiseSettledResult<void>> {
+  try {
+    const result = await callAppsScript(request, demo, 'CANCEL');
+    return settledOperation(result.calendar, 'Apps Script 캘린더 삭제에 실패했습니다.');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Apps Script 호출에 실패했습니다.';
+    return rejected(`Apps Script 캘린더 삭제 호출 실패: ${message}`);
+  }
 }
 
 export function integrationFailureSummary(result: ApprovalIntegrationResult) {
