@@ -1,7 +1,7 @@
 import 'server-only';
 
 import crypto from 'crypto';
-import { FieldValue, Timestamp } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp } from '@google-cloud/firestore';
 import { isDemoMode } from './auth';
 import { adminErrorDiagnostic, DomainError as Error } from './api-error';
 import { resolveApprovalRoute, type ApprovalRouteError } from './approval-routing-policy';
