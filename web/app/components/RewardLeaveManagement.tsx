@@ -2,7 +2,7 @@
 
 import { FormEvent, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import type { EmployeeBalance, RewardGrantView } from '../lib/leave-store';
+import type { RewardGrantEmployeeOption, RewardGrantView } from '../lib/leave-store';
 import Pagination, { getPageItems } from './Pagination';
 
 function today() {
@@ -32,7 +32,7 @@ export default function RewardLeaveManagement({
   employees,
   grants,
 }: {
-  employees: EmployeeBalance[];
+  employees: RewardGrantEmployeeOption[];
   grants: RewardGrantView[];
 }) {
   const router = useRouter();

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { apiErrorResponse } from '../../../lib/api-error';
 import { getApiSession, isDemoMode, isSameOriginRequest } from '../../../lib/auth';
+import { diagnoseFirebaseConnection } from '../../../lib/firebase-admin';
 import { type EmployeeInput, type EmployeeStatus, type Permission, type Position, recordOperationFailure, upsertEmployee } from '../../../lib/leave-store';
 
 const POSITIONS = new Set<Position>(['EMPLOYEE', 'TEAM_LEAD', 'REPRESENTATIVE']);
@@ -27,15 +28,23 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     await recordOperationFailure({ actorEmail: session.email, operation: 'UPSERT_EMPLOYEE', targetType: 'EMPLOYEE', targetId: body.email, error });
     const { message, expected } = apiErrorResponse(error, '직원을 저장하지 못했습니다. 관리자 실패 로그를 확인해 주세요.');
+    const diagnostic = expected ? null : await diagnoseFirebaseConnection(error);
+    const responseMessage = diagnostic && diagnostic.code !== 'FIREBASE_UNKNOWN'
+      ? diagnostic.message
+      : message;
     const status = !expected
-      ? 500
-      : message.includes('직원 관리 권한')
+      ? diagnostic?.code === 'FIREBASE_AUTH_ERROR'
+        || diagnostic?.code === 'FIRESTORE_PERMISSION_DENIED'
+        || diagnostic?.code === 'SERVICE_ACCOUNT_IMPERSONATION_DENIED'
+        ? 503
+        : 500
+      : responseMessage.includes('직원 관리 권한')
       ? 403
-      : message.includes('찾을 수 없')
+      : responseMessage.includes('찾을 수 없')
         ? 404
-        : message.includes('비활성화할 수 없') || message.includes('활성 사내 직원') || message.includes('승인 대기 신청') || message.includes('마지막 활성 관리자')
+        : responseMessage.includes('비활성화할 수 없') || responseMessage.includes('활성 사내 직원') || responseMessage.includes('승인 대기') || responseMessage.includes('마지막 활성 관리자')
           ? 409
           : 400;
-    return NextResponse.json({ error: message }, { status });
+    return NextResponse.json({ error: responseMessage }, { status });
   }
 }

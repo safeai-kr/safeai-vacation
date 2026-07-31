@@ -68,6 +68,12 @@ export interface EmployeeBalance extends Employee {
   effectiveApproverName: string;
 }
 
+export interface RewardGrantEmployeeOption {
+  email: string;
+  name: string;
+  teamName: string;
+}
+
 export interface LeaveRequest {
   requestId: string;
   applicantEmail: string;
@@ -98,6 +104,7 @@ export interface LeaveDashboard {
   connectionDiagnostic?: FirebaseConnectionDiagnostic;
   balances: EmployeeBalance[];
   adminEmployees: EmployeeBalance[];
+  rewardGrantEmployees: RewardGrantEmployeeOption[];
   requests: LeaveRequest[];
   rewardGrants: RewardGrantView[];
   teams: Team[];
@@ -668,8 +675,11 @@ function demoDashboard(viewerEmail: string): LeaveDashboard {
   return {
     connected: true,
     source: 'demo',
-    balances: employees,
+    balances: isAdmin ? employees : employees.filter(employee => employee.email === viewer.email),
     adminEmployees: isAdmin ? employees : [],
+    rewardGrantEmployees: employees
+      .filter(employee => rewardGrantEmployeeEmails.includes(employee.email))
+      .map(employee => ({ email: employee.email, name: employee.name, teamName: employee.teamName })),
     teams,
     rewardGrants: rewardGrants.filter(grant => rewardGrantEmployeeEmails.includes(grant.employeeEmail)),
     requests: requests.map(request => {
@@ -771,10 +781,16 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
         effectiveApproverName: approver.name,
       };
     };
-    const balances = eligibleEmployees.map(balanceForEmployee).sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+    const allBalances = eligibleEmployees.map(balanceForEmployee).sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+    const balances = isAdmin
+      ? allBalances
+      : allBalances.filter(employee => employee.email === email);
     const adminEmployees = isAdmin
       ? allEmployees.map(balanceForEmployee).sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name, 'ko'))
       : [];
+    const rewardGrantEmployees = allBalances
+      .filter(employee => rewardGrantEmployeeEmails.includes(employee.email))
+      .map(employee => ({ email: employee.email, name: employee.name, teamName: employee.teamName }));
 
     const rewardGrants = grants
       .filter(grant => visibleRewardGrantEmployeeEmails.includes(grant.employeeEmail))
@@ -814,6 +830,7 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
       source: 'firebase',
       balances,
       adminEmployees,
+      rewardGrantEmployees,
       teams,
       rewardGrants,
       requests: requests.map(request => {
@@ -854,6 +871,7 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
       connectionDiagnostic,
       balances: [],
       adminEmployees: [],
+      rewardGrantEmployees: [],
       requests: [],
       rewardGrants: [],
       teams: [],
@@ -1003,10 +1021,24 @@ export async function upsertEmployee(actorEmail: string, input: EmployeeInput) {
     }
     const routeApprover = active ? requiredApprover(futureEmployee, futureTeams, futureDirectory) : null;
 
+    if (employeeSnapshot.exists && hasPendingApplicantRequest && previousHireDate !== input.hireDate) {
+      throw new Error('승인 대기 신청이 있어 입사일을 수정할 수 없습니다. 먼저 신청을 처리해 주세요.');
+    }
     if (employeeSnapshot.exists
-      && hasPendingApplicantRequest
-      && (previousHireDate !== input.hireDate || Math.abs(previousOpeningAnnualUsedDays - input.openingAnnualUsedDays) > 0.0001)) {
-      throw new Error('승인 대기 신청이 있어 입사일 또는 기존 사용 연차를 수정할 수 없습니다. 먼저 신청을 처리해 주세요.');
+      && Math.abs(previousOpeningAnnualUsedDays - input.openingAnnualUsedDays) > 0.0001) {
+      const annualBalanceWithoutOpeningUsage = ledgerSnapshot.docs
+        .map(doc => doc.data())
+        .filter(entry => entry.source === 'ANNUAL' && entry.entryType !== 'OPENING_USAGE')
+        .reduce((sum, entry) => sum + numberValue(entry.days), 0);
+      const pendingAnnualDays = applicantRequests.docs
+        .map(doc => doc.data())
+        .filter(request => request.status === 'PENDING' && request.source === 'ANNUAL')
+        .reduce((sum, request) => sum + numberValue(request.days), 0);
+      const annualBalanceAfterUpdate = annualBalanceWithoutOpeningUsage - input.openingAnnualUsedDays;
+      const availableAfterUpdate = annualBalanceAfterUpdate - pendingAnnualDays;
+      if (!hasSufficientLeaveBalance(pendingAnnualDays, annualBalanceAfterUpdate)) {
+        throw new Error(`기존 사용 연차를 반영하면 승인 대기분을 제외한 정기 연차가 ${normalizedAvailableDays(availableAfterUpdate)}일이 됩니다. 대기 신청을 먼저 처리하거나 기존 사용 연차를 확인해 주세요.`);
+      }
     }
     const wasEffectiveAdmin = hasAdminAccess(email, employeeSnapshot.data());
     const willBeEffectiveAdmin = active && input.permission === 'ADMIN';

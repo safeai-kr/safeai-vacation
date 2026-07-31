@@ -64,7 +64,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
   const adminCancelableRequests = dashboard.viewer.isAdmin
     ? dashboard.requests.filter((request): request is CancellableRequest => (request.status === 'PENDING' || request.status === 'APPROVED') && request.canCancel)
     : [];
-  const rewardEligibleEmployees = dashboard.balances.filter(employee => dashboard.viewer.rewardGrantEmployeeEmails.includes(employee.email));
+  const rewardEligibleEmployees = dashboard.rewardGrantEmployees;
 
   if (!dashboard.connected) {
     return (
@@ -137,10 +137,10 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
           <section className="content-card">
             <div className="card-header">
               <div>
-                <h2>구성원 연차 현황</h2>
+                <h2>{dashboard.viewer.isAdmin ? '구성원 연차 현황' : '나의 연차 상세'}</h2>
                 <p>입사일 자동 부여, 기존 사용분, 승인 대기 예약을 반영합니다.</p>
               </div>
-              <span>총 {dashboard.balances.length}명</span>
+              <span>{dashboard.viewer.isAdmin ? `총 ${dashboard.balances.length}명` : '본인만 조회 가능'}</span>
             </div>
             <div className="table-wrap">
               <table className="data-table">
