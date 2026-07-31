@@ -44,10 +44,18 @@ main.page-shell { padding-top: 28px; padding-bottom: 56px; }
 .demo-notice { margin: 0; border: 1px solid #bfdbfe; border-radius: 7px; padding: 8px 11px; color: #1e40af; background: var(--blue-soft); font-size: 12px; }
 
 .tab-nav { display: flex; gap: 24px; border-bottom: 1px solid var(--border); }
-.tab-nav a { position: relative; margin-bottom: -1px; border-bottom: 2px solid transparent; padding: 12px 2px; color: var(--muted); font-size: 14px; font-weight: 700; }
-.tab-nav a:hover, .tab-nav a.active { color: var(--blue); }
-.tab-nav a.active { border-bottom-color: var(--blue); }
-.tab-nav a span { display: inline-grid; min-width: 19px; height: 19px; margin-left: 5px; place-items: center; border-radius: 9px; color: #fff; background: var(--blue); font-size: 10px; }
+.tab-nav button { position: relative; margin-bottom: -1px; border: 0; border-bottom: 2px solid transparent; padding: 12px 2px; color: var(--muted); background: transparent; cursor: pointer; font-size: 14px; font-weight: 700; white-space: nowrap; }
+.tab-nav button:hover, .tab-nav button.active { color: var(--blue); }
+.tab-nav button.active { border-bottom-color: var(--blue); }
+.tab-nav button:focus-visible { border-radius: 4px; outline: 3px solid rgba(37, 99, 235, .18); outline-offset: 2px; }
+.tab-nav button span { display: inline-grid; min-width: 19px; height: 19px; margin-left: 5px; place-items: center; border-radius: 9px; color: #fff; background: var(--blue); font-size: 10px; }
+.dashboard-tab-panel { display: none; }
+[data-active-dashboard-tab="overview"] > [data-dashboard-tab-panel="overview"],
+[data-active-dashboard-tab="requests"] > [data-dashboard-tab-panel="requests"],
+[data-active-dashboard-tab="approvals"] > [data-dashboard-tab-panel="approvals"],
+[data-active-dashboard-tab="rewards"] > [data-dashboard-tab-panel="rewards"],
+[data-active-dashboard-tab="employees"] > [data-dashboard-tab-panel="employees"],
+[data-active-dashboard-tab="history"] > [data-dashboard-tab-panel="history"] { display: block; }
 .tab-content { padding-top: 20px; }
 
 .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
@@ -194,7 +202,7 @@ textarea.field-input { height: 96px; min-height: 96px; resize: vertical; }
   .page-title-row { align-items: flex-start; flex-direction: column; gap: 10px; }
   .page-title-row h1 { font-size: 21px; }
   .tab-nav { gap: 16px; overflow-x: auto; }
-  .tab-nav a { flex-shrink: 0; }
+  .tab-nav button { flex-shrink: 0; }
   .summary-grid { grid-template-columns: 1fr 1fr; }
   .summary-card { min-height: 104px; padding: 15px; }
   .summary-card strong { font-size: 23px; }

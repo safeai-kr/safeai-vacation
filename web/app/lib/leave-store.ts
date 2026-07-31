@@ -709,24 +709,30 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
 
   try {
     const db = firestore();
-    const [employeeSnapshot, teamSnapshot] = await Promise.all([
+    const initialSnapshots = await Promise.all([
       db.collection('employees').get(),
       db.collection('teams').get(),
+      db.collection('leave_requests').get(),
+      db.collection('leave_ledger').get(),
+      db.collection('reward_grants').get(),
+      db.collection('reward_allocations').get(),
     ]);
+    const [employeeSnapshot, teamSnapshot, requestSnapshot, initialLedgerSnapshot, grantSnapshot, allocationSnapshot] = initialSnapshots;
     const teams = teamSnapshot.docs
       .map(doc => parseTeam(doc.id, doc.data()))
       .filter(team => team.active)
       .sort((a, b) => a.name.localeCompare(b.name, 'ko'));
     const allEmployees = employeeSnapshot.docs.map(doc => parseEmployee(doc.data()));
     const eligibleEmployees = allEmployees.filter(employee => employee.active && employee.profileStatus === 'COMPLETE');
-    await Promise.all(eligibleEmployees.map(employee => syncAnnualGrants(employee.email)));
-
-    const [requestSnapshot, ledgerSnapshot, grantSnapshot, allocationSnapshot] = await Promise.all([
-      db.collection('leave_requests').get(),
-      db.collection('leave_ledger').get(),
-      db.collection('reward_grants').get(),
-      db.collection('reward_allocations').get(),
-    ]);
+    const initialLedgerIds = new Set(initialLedgerSnapshot.docs.map(doc => doc.id));
+    const employeesRequiringAnnualSync = eligibleEmployees.filter(employee => annualGrantEvents(employee.hireDate)
+      .some(event => !initialLedgerIds.has(ledgerId(`${employee.email}:${event.key}`))));
+    if (employeesRequiringAnnualSync.length > 0) {
+      await Promise.all(employeesRequiringAnnualSync.map(employee => syncAnnualGrants(employee.email)));
+    }
+    const ledgerSnapshot = employeesRequiringAnnualSync.length > 0
+      ? await db.collection('leave_ledger').get()
+      : initialLedgerSnapshot;
     const requests = requestSnapshot.docs.map(doc => parseRequest(doc.id, doc.data())).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     const ledger = ledgerSnapshot.docs.map(doc => doc.data());
     const grants = grantSnapshot.docs.map(doc => parseRewardGrant(doc.id, doc.data()));

@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic';
 
 import CancelRequestButton from './components/CancelRequestButton';
+import { DashboardTabPanel, DashboardTabs, type DashboardTab } from './components/DashboardTabs';
 import DecisionButtons from './components/DecisionButtons';
 import EmployeeManagement from './components/EmployeeManagement';
 import LeaveRequestForm from './components/LeaveRequestForm';
@@ -10,7 +11,7 @@ import RewardLeaveManagement from './components/RewardLeaveManagement';
 import { isDemoMode, requireCompanyAccess } from './lib/auth';
 import { fetchAdminOperationRecords, fetchLeaveDashboard, LeaveDuration, LeaveRequest, LeaveSource, LeaveStatus } from './lib/leave-store';
 
-type Tab = 'overview' | 'requests' | 'approvals' | 'rewards' | 'employees' | 'history';
+type Tab = DashboardTab;
 type CancellableRequest = LeaveRequest & { status: Extract<LeaveStatus, 'PENDING' | 'APPROVED'> };
 
 const STATUS_COPY: Record<LeaveStatus, { label: string; className: string }> = {
@@ -54,7 +55,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
     || (requestedTab === 'history' && dashboard.viewer.isAdmin)
     ? requestedTab
     : 'overview';
-  const operationRecords = activeTab === 'history'
+  const operationRecords = dashboard.viewer.isAdmin
     ? await fetchAdminOperationRecords(session.email, dashboard.requests)
     : null;
   const myBalance = dashboard.balances.find(balance => balance.email === session.email);
@@ -65,6 +66,16 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
     ? dashboard.requests.filter((request): request is CancellableRequest => (request.status === 'PENDING' || request.status === 'APPROVED') && request.canCancel)
     : [];
   const rewardEligibleEmployees = dashboard.rewardGrantEmployees;
+  const tabs = [
+    { id: 'overview' as const, label: '연차 현황' },
+    { id: 'requests' as const, label: '신청 내역' },
+    ...(dashboard.viewer.canApprove ? [{ id: 'approvals' as const, label: '승인 관리', badge: pendingRequests.length }] : []),
+    ...(dashboard.viewer.canGrantReward ? [{ id: 'rewards' as const, label: '포상 연차' }] : []),
+    ...(dashboard.viewer.isAdmin ? [
+      { id: 'employees' as const, label: '직원 관리' },
+      { id: 'history' as const, label: '기록 관리' },
+    ] : []),
+  ];
 
   if (!dashboard.connected) {
     return (
@@ -99,21 +110,8 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
         {isDemoMode() && <span className="demo-notice">데모 모드 · 실제 저장 안 됨</span>}
       </div>
 
-      <nav className="tab-nav" aria-label="연차 관리 메뉴">
-        <a href="/?tab=overview" className={activeTab === 'overview' ? 'active' : ''}>연차 현황</a>
-        <a href="/?tab=requests" className={activeTab === 'requests' ? 'active' : ''}>신청 내역</a>
-        {dashboard.viewer.canApprove && (
-          <a href="/?tab=approvals" className={activeTab === 'approvals' ? 'active' : ''}>
-            승인 관리
-            {pendingRequests.length > 0 && <span>{pendingRequests.length}</span>}
-          </a>
-        )}
-        {dashboard.viewer.canGrantReward && <a href="/?tab=rewards" className={activeTab === 'rewards' ? 'active' : ''}>포상 연차</a>}
-        {dashboard.viewer.isAdmin && <a href="/?tab=employees" className={activeTab === 'employees' ? 'active' : ''}>직원 관리</a>}
-        {dashboard.viewer.isAdmin && <a href="/?tab=history" className={activeTab === 'history' ? 'active' : ''}>기록 관리</a>}
-      </nav>
-
-      {activeTab === 'overview' && (
+      <DashboardTabs initialTab={activeTab} tabs={tabs}>
+        <DashboardTabPanel tab="overview">
         <div className="tab-content">
           <section className="summary-grid">
             <article className="summary-card primary-summary">
@@ -188,9 +186,9 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
             </div>
           </section>
         </div>
-      )}
+        </DashboardTabPanel>
 
-      {activeTab === 'requests' && (
+        <DashboardTabPanel tab="requests">
         <div className="tab-content request-layout">
           <section className="content-card form-card">
             <div className="card-header"><div><h2>연차 신청</h2><p>기간을 선택하면 주말을 제외해 사용 일수를 자동 계산합니다.</p></div></div>
@@ -236,9 +234,10 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
             </PaginatedList>
           </section>
         </div>
-      )}
+        </DashboardTabPanel>
 
-      {activeTab === 'approvals' && dashboard.viewer.canApprove && (
+      {dashboard.viewer.canApprove && (
+        <DashboardTabPanel tab="approvals">
         <div className="tab-content">
           <section className="content-card">
             <div className="card-header"><div><h2>승인 대기 내역</h2><p>상세 사유를 확인한 후 승인 또는 반려해 주세요.</p></div><span>대기 {pendingRequests.length}건</span></div>
@@ -295,25 +294,33 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
             </section>
           )}
         </div>
+        </DashboardTabPanel>
       )}
 
-      {activeTab === 'rewards' && dashboard.viewer.canGrantReward && (
+      {dashboard.viewer.canGrantReward && (
+        <DashboardTabPanel tab="rewards">
         <div className="tab-content">
           <RewardLeaveManagement employees={rewardEligibleEmployees} grants={dashboard.rewardGrants} />
         </div>
+        </DashboardTabPanel>
       )}
 
-      {activeTab === 'employees' && dashboard.viewer.isAdmin && (
+      {dashboard.viewer.isAdmin && (
+        <DashboardTabPanel tab="employees">
         <div className="tab-content">
           <EmployeeManagement teams={dashboard.teams} employees={dashboard.adminEmployees} />
         </div>
+        </DashboardTabPanel>
       )}
 
-      {activeTab === 'history' && dashboard.viewer.isAdmin && operationRecords && (
+      {dashboard.viewer.isAdmin && operationRecords && (
+        <DashboardTabPanel tab="history">
         <div className="tab-content">
           <OperationHistoryManagement records={operationRecords} />
         </div>
+        </DashboardTabPanel>
       )}
+      </DashboardTabs>
     </div>
   );
 }
