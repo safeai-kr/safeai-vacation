@@ -4,6 +4,7 @@ import {
   integrationFailureSummary,
   runApprovedLeaveIntegrations,
   updateSlackDecisionMessage,
+  updateSlackProcessingMessage,
 } from '../../../../lib/leave-integrations';
 import { decideLeaveRequest, recordOperationFailure } from '../../../../lib/leave-store';
 import { getApiSession, isDemoMode, isSameOriginRequest } from '../../../../lib/auth';
@@ -27,35 +28,54 @@ export async function POST(
   try {
     const result = await decideLeaveRequest(requestId, session.email, action);
     after(async () => {
+      const hasSlackMessage = Boolean(
+        result.integrationRequest.slackChannelId
+        && result.integrationRequest.slackMessageTs,
+      );
+      if (hasSlackMessage) {
+        try {
+          await updateSlackProcessingMessage({
+            request: result.integrationRequest,
+            channelId: result.integrationRequest.slackChannelId!,
+            messageTs: result.integrationRequest.slackMessageTs!,
+            action,
+          });
+        } catch (error) {
+          console.error('web_decision_slack_processing_message_update_failed', error);
+        }
+      }
+
       let warning = '';
       if (action === 'approve') {
         const integrationResult = await runApprovedLeaveIntegrations(result.integrationRequest, false);
         warning = integrationFailureSummary(integrationResult);
+        const failureLogs: Promise<unknown>[] = [];
         if (integrationResult.calendar.status === 'rejected') {
-          await recordOperationFailure({
+          failureLogs.push(recordOperationFailure({
             actorEmail: session.email,
             operation: 'CREATE_CALENDAR_EVENT',
             targetType: 'LEAVE_REQUEST',
             targetId: requestId,
             error: integrationResult.calendar.reason,
-          });
+          }));
         }
         if (integrationResult.email.status === 'rejected') {
-          await recordOperationFailure({
+          failureLogs.push(recordOperationFailure({
             actorEmail: session.email,
             operation: 'SEND_APPROVAL_EMAIL',
             targetType: 'LEAVE_REQUEST',
             targetId: requestId,
             error: integrationResult.email.reason,
-          });
+          }));
         }
+        await Promise.allSettled(failureLogs);
       }
-      if (result.integrationRequest.slackChannelId && result.integrationRequest.slackMessageTs) {
+      if (hasSlackMessage) {
         try {
           await updateSlackDecisionMessage({
             request: result.integrationRequest,
-            channelId: result.integrationRequest.slackChannelId,
-            messageTs: result.integrationRequest.slackMessageTs,
+            channelId: result.integrationRequest.slackChannelId!,
+            messageTs: result.integrationRequest.slackMessageTs!,
             action,
             actorLabel: session.email,
             integrationWarning: warning,

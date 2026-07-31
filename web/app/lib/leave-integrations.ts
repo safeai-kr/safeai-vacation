@@ -32,7 +32,7 @@ export type SlackBlockActionPayload = {
   channel?: { id?: string };
   message?: {
     ts?: string;
-    blocks?: Array<{
+    blocks?: Array<Record<string, unknown> & {
       block_id?: string;
       text?: { text?: string };
     }>;
@@ -116,6 +116,17 @@ function periodLabel(request: Pick<LeaveIntegrationRequest, 'startDate' | 'endDa
     : `${request.startDate} ~ ${request.endDate}`;
 }
 
+function slackRequestSummary(request: LeaveIntegrationRequest) {
+  return [
+    '휴가 사용 요청이 있습니다.',
+    '',
+    `요청자: ${request.applicantName}`,
+    `기간: ${request.startDate} ~ ${request.endDate}`,
+    `종류: ${leaveTypeLabel(request)}`,
+    `사유: ${request.reason || '-'}`,
+  ].join('\n');
+}
+
 function signSlackActionTarget(target: SlackActionTarget) {
   const payload = base64Url(JSON.stringify(target));
   const signature = base64Url(crypto.createHmac('sha256', slackSigningSecret()).update(payload).digest());
@@ -186,28 +197,19 @@ async function resolveSlackRecipient(request: LeaveIntegrationRequest, demo: boo
 }
 
 function slackRequestBlocks(request: LeaveIntegrationRequest, actionValue: string) {
-  const reason = request.reason || '-';
   return [
     {
       type: 'section',
       block_id: 'leave_reason',
       text: {
         type: 'plain_text',
-        text: [
-          '휴가 사용 요청이 있습니다.',
-          '',
-          `요청자: ${request.applicantName}`,
-          `기간: ${request.startDate} ~ ${request.endDate}`,
-          `종류: ${leaveTypeLabel(request)}`,
-          `사유: ${reason}`,
-          '',
-          '승인하시겠습니까?',
-        ].join('\n'),
+        text: `${slackRequestSummary(request)}\n\n승인하시겠습니까?`,
         emoji: true,
       },
     },
     {
       type: 'actions',
+      block_id: 'leave_decision_actions',
       elements: [
         {
           type: 'button',
@@ -271,6 +273,77 @@ export function slackReasonFromPayload(payload: SlackBlockActionPayload) {
     reasonStart + reasonPrefix.length,
     reasonEnd > reasonStart ? reasonEnd : undefined,
   );
+}
+
+export function slackRequestSummaryFromPayload(payload: SlackBlockActionPayload) {
+  const text = payload.message?.blocks?.find(block => block.block_id === 'leave_reason')?.text?.text ?? '';
+  return text.replace(/\n\n승인하시겠습니까\?$/, '').trim();
+}
+
+export async function updateSlackProcessingMessage(input: {
+  channelId: string;
+  messageTs: string;
+  action: 'approve' | 'reject';
+  request?: LeaveIntegrationRequest;
+  requestSummary?: string;
+}) {
+  const actionLabel = input.action === 'approve' ? '승인' : '반려';
+  const requestSummary = input.requestSummary || (input.request ? slackRequestSummary(input.request) : '');
+  const blocks: Array<Record<string, unknown>> = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: `⏳ ${actionLabel} 처리 중`, emoji: true },
+    },
+  ];
+  if (requestSummary) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'plain_text', text: requestSummary.slice(0, 2_900), emoji: true },
+    });
+  }
+  blocks.push({
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: '요청을 처리하고 있습니다. 잠시만 기다려 주세요.' }],
+  });
+  await slackApi<SlackApiResponse>('chat.update', {
+    channel: input.channelId,
+    ts: input.messageTs,
+    text: `${actionLabel} 요청을 처리하고 있습니다.`,
+    blocks,
+  });
+}
+
+export async function updateSlackDecisionFailureMessage(input: {
+  channelId: string;
+  messageTs: string;
+  requestSummary?: string;
+  errorMessage?: string;
+}) {
+  const blocks: Array<Record<string, unknown>> = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: '⚠️ 처리 실패', emoji: true },
+    },
+  ];
+  if (input.requestSummary) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'plain_text', text: input.requestSummary.slice(0, 2_900), emoji: true },
+    });
+  }
+  blocks.push({
+    type: 'context',
+    elements: [{
+      type: 'mrkdwn',
+      text: escapeSlackText(input.errorMessage || '요청을 처리하지 못했습니다. 웹페이지에서 상태를 확인해 주세요.'),
+    }],
+  });
+  await slackApi<SlackApiResponse>('chat.update', {
+    channel: input.channelId,
+    ts: input.messageTs,
+    text: '연차 신청을 처리하지 못했습니다.',
+    blocks,
+  });
 }
 
 export async function updateSlackDecisionMessage(input: {

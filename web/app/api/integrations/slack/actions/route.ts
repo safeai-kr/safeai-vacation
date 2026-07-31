@@ -3,8 +3,11 @@ import {
   integrationFailureSummary,
   runApprovedLeaveIntegrations,
   slackReasonFromPayload,
+  slackRequestSummaryFromPayload,
   type SlackBlockActionPayload,
+  updateSlackDecisionFailureMessage,
   updateSlackDecisionMessage,
+  updateSlackProcessingMessage,
   verifySlackActionTarget,
   verifySlackRequest,
 } from '../../../../lib/leave-integrations';
@@ -19,6 +22,21 @@ function actionFromPayload(payload: SlackBlockActionPayload) {
   if (action?.action_id === 'leave_approve') return { action: 'approve' as const, value: action.value };
   if (action?.action_id === 'leave_reject') return { action: 'reject' as const, value: action.value };
   return null;
+}
+
+function decisionErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  const expectedMessages = [
+    '이미 처리된 신청',
+    '담당 승인자',
+    '등록이 완료된 활성 사내 승인자',
+    '비활성 직원',
+    '잔액',
+    '본인의 신청',
+  ];
+  return expectedMessages.some(expected => message.includes(expected))
+    ? message
+    : '요청을 처리하지 못했습니다. 웹페이지에서 상태를 확인해 주세요.';
 }
 
 export async function POST(request: NextRequest) {
@@ -69,12 +87,26 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: '이 신청의 승인자가 아닙니다.' }, { status: 403 });
   }
 
+  const requestSummary = slackRequestSummaryFromPayload(payload);
+  const slackActorLabel = payload.user?.username || payload.user?.name || slackUserId;
+
   if (target.mode === 'demo') {
     const demoRequest = {
       ...target.request,
       reason: slackReasonFromPayload(payload),
     };
     after(async () => {
+      try {
+        await updateSlackProcessingMessage({
+          channelId,
+          messageTs,
+          action: selected.action,
+          requestSummary,
+        });
+      } catch (error) {
+        console.error('demo_slack_processing_message_update_failed', error);
+      }
+
       let warning = '';
       if (selected.action === 'approve') {
         const result = await runApprovedLeaveIntegrations(demoRequest, true);
@@ -88,7 +120,7 @@ export async function POST(request: NextRequest) {
           channelId,
           messageTs,
           action: selected.action,
-          actorLabel: payload.user?.username || payload.user?.name || slackUserId,
+          actorLabel: slackActorLabel,
           integrationWarning: warning,
         });
       } catch (error) {
@@ -98,58 +130,87 @@ export async function POST(request: NextRequest) {
     return new NextResponse(null, { status: 200 });
   }
 
-  try {
-    const actorEmail = await employeeEmailForSlackUser(slackUserId);
-    const decision = await decideLeaveRequest(target.requestId, actorEmail, selected.action);
-    after(async () => {
-      let warning = '';
-      if (selected.action === 'approve') {
-        const result = await runApprovedLeaveIntegrations(decision.integrationRequest, false);
-        warning = integrationFailureSummary(result);
-        if (result.calendar.status === 'rejected') {
-          await recordOperationFailure({
-            actorEmail,
-            operation: 'CREATE_CALENDAR_EVENT',
-            targetType: 'LEAVE_REQUEST',
-            targetId: target.requestId,
-            error: result.calendar.reason,
-          });
-        }
-        if (result.email.status === 'rejected') {
-          await recordOperationFailure({
-            actorEmail,
-            operation: 'SEND_APPROVAL_EMAIL',
-            targetType: 'LEAVE_REQUEST',
-            targetId: target.requestId,
-            error: result.email.reason,
-          });
-        }
-      }
+  const requestId = target.requestId;
+  after(async () => {
+    try {
+      await updateSlackProcessingMessage({
+        channelId,
+        messageTs,
+        action: selected.action,
+        requestSummary,
+      });
+    } catch (error) {
+      console.error('slack_processing_message_update_failed', error);
+    }
+
+    let actorEmail = '';
+    let decision: Awaited<ReturnType<typeof decideLeaveRequest>>;
+    try {
+      actorEmail = await employeeEmailForSlackUser(slackUserId);
+      decision = await decideLeaveRequest(requestId, actorEmail, selected.action);
+    } catch (error) {
+      console.error('slack_leave_decision_failed', error);
       try {
-        await updateSlackDecisionMessage({
-          request: decision.integrationRequest,
+        await updateSlackDecisionFailureMessage({
           channelId,
           messageTs,
-          action: selected.action,
-          actorLabel: actorEmail,
-          integrationWarning: warning,
+          requestSummary,
+          errorMessage: decisionErrorMessage(error),
         });
-      } catch (error) {
+      } catch (messageError) {
+        console.error('slack_failure_message_update_failed', messageError);
+      }
+      return;
+    }
+
+    let warning = '';
+    if (selected.action === 'approve') {
+      const result = await runApprovedLeaveIntegrations(decision.integrationRequest, false);
+      warning = integrationFailureSummary(result);
+      const failureLogs: Promise<unknown>[] = [];
+      if (result.calendar.status === 'rejected') {
+        failureLogs.push(recordOperationFailure({
+          actorEmail,
+          operation: 'CREATE_CALENDAR_EVENT',
+          targetType: 'LEAVE_REQUEST',
+          targetId: requestId,
+          error: result.calendar.reason,
+        }));
+      }
+      if (result.email.status === 'rejected') {
+        failureLogs.push(recordOperationFailure({
+          actorEmail,
+          operation: 'SEND_APPROVAL_EMAIL',
+          targetType: 'LEAVE_REQUEST',
+          targetId: requestId,
+          error: result.email.reason,
+        }));
+      }
+      await Promise.allSettled(failureLogs);
+    }
+
+    try {
+      await updateSlackDecisionMessage({
+        request: decision.integrationRequest,
+        channelId,
+        messageTs,
+        action: selected.action,
+        actorLabel: actorEmail,
+        integrationWarning: warning,
+      });
+    } catch (error) {
+      try {
         await recordOperationFailure({
           actorEmail,
           operation: 'UPDATE_SLACK_MESSAGE',
           targetType: 'LEAVE_REQUEST',
-          targetId: target.requestId,
+          targetId: requestId,
           error,
         });
+      } catch (loggingError) {
+        console.error('slack_message_update_failure_log_failed', loggingError);
       }
-    });
-    return new NextResponse(null, { status: 200 });
-  } catch (error) {
-    console.error('slack_leave_decision_failed', error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : '연차 신청을 처리하지 못했습니다.' },
-      { status: 409 },
-    );
-  }
+    }
+  });
+  return new NextResponse(null, { status: 200 });
 }
