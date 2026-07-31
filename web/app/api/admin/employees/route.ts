@@ -1,5 +1,6 @@
+import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { apiErrorResponse } from '../../../lib/api-error';
+import { adminErrorDiagnostic, apiErrorResponse } from '../../../lib/api-error';
 import { getApiSession, isDemoMode, isSameOriginRequest } from '../../../lib/auth';
 import { diagnoseFirebaseConnection } from '../../../lib/firebase-admin';
 import { type EmployeeInput, type EmployeeStatus, type Permission, type Position, recordOperationFailure, upsertEmployee } from '../../../lib/leave-store';
@@ -26,8 +27,25 @@ export async function POST(request: NextRequest) {
   try {
     return NextResponse.json({ ok: true, ...await upsertEmployee(session.email, { email: body.email, name: body.name, hireDate, teamId: body.teamId ?? '', position, permission, slackUserId: body.slackUserId ?? '', replacementManagerEmail: body.replacementManagerEmail ?? '', openingAnnualUsedDays, employmentStatus }) });
   } catch (error) {
-    await recordOperationFailure({ actorEmail: session.email, operation: 'UPSERT_EMPLOYEE', targetType: 'EMPLOYEE', targetId: body.email, error });
-    const { message, expected } = apiErrorResponse(error, '직원을 저장하지 못했습니다. 관리자 실패 로그를 확인해 주세요.');
+    const correlationId = crypto.randomUUID().slice(0, 8);
+    const technical = adminErrorDiagnostic(error);
+    console.error('employee_upsert_failed', {
+      correlationId,
+      actorEmail: session.email,
+      targetId: body.email,
+      code: technical.code,
+      message: technical.message,
+    });
+    await recordOperationFailure({
+      actorEmail: session.email,
+      operation: 'UPSERT_EMPLOYEE',
+      targetType: 'EMPLOYEE',
+      targetId: body.email,
+      error,
+      correlationId,
+      technicalMessage: `[${technical.code}] ${technical.message}`,
+    });
+    const { message, expected } = apiErrorResponse(error, '직원을 저장하지 못했습니다.');
     const diagnostic = expected ? null : await diagnoseFirebaseConnection(error);
     const responseMessage = diagnostic && diagnostic.code !== 'FIREBASE_UNKNOWN'
       ? diagnostic.message
@@ -45,6 +63,13 @@ export async function POST(request: NextRequest) {
         : responseMessage.includes('비활성화할 수 없') || responseMessage.includes('활성 사내 직원') || responseMessage.includes('승인 대기') || responseMessage.includes('마지막 활성 관리자')
           ? 409
           : 400;
-    return NextResponse.json({ error: responseMessage }, { status });
+    return NextResponse.json({
+      error: responseMessage,
+      ...(!expected ? {
+        correlationId,
+        diagnosticCode: diagnostic?.code ?? technical.code,
+        technicalMessage: technical.message,
+      } : {}),
+    }, { status });
   }
 }

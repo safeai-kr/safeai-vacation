@@ -3,7 +3,7 @@ import 'server-only';
 import crypto from 'crypto';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { isDemoMode } from './auth';
-import { DomainError as Error } from './api-error';
+import { adminErrorDiagnostic, DomainError as Error } from './api-error';
 import { resolveApprovalRoute, type ApprovalRouteError } from './approval-routing-policy';
 import { diagnoseFirebaseConnection, firestore, type FirebaseConnectionDiagnostic } from './firebase-admin';
 import { hasSufficientLeaveBalance, normalizedAvailableDays } from './leave-balance-policy';
@@ -221,6 +221,7 @@ export interface OperationHistoryItem {
 
 export interface OperationFailureLog {
   id: string;
+  correlationId: string;
   operation: string;
   actorEmail: string;
   targetType: string;
@@ -1880,6 +1881,7 @@ export async function fetchAdminOperationRecords(
     const data = doc.data();
     return {
       id: doc.id,
+      correlationId: String(data.correlationId ?? ''),
       operation: String(data.operation ?? ''),
       actorEmail: normalizedEmail(data.actorEmail),
       targetType: String(data.targetType ?? ''),
@@ -1899,11 +1901,15 @@ export async function recordOperationFailure(input: {
   targetType?: string;
   targetId?: string;
   error: unknown;
+  correlationId?: string;
+  technicalMessage?: string;
 }) {
-  const message = input.error instanceof globalThis.Error ? input.error.message : '알 수 없는 처리 오류';
+  const message = input.technicalMessage
+    || (input.error instanceof globalThis.Error ? input.error.message : '알 수 없는 처리 오류');
   try {
     await firestore().collection('operation_logs').add({
       outcome: 'FAILURE',
+      correlationId: String(input.correlationId ?? '').slice(0, 80),
       operation: input.operation.slice(0, 80),
       actorEmail: normalizedEmail(input.actorEmail),
       targetType: String(input.targetType ?? '').slice(0, 80),
@@ -1914,11 +1920,14 @@ export async function recordOperationFailure(input: {
       createdAt: FieldValue.serverTimestamp(),
     });
   } catch (loggingError) {
+    const loggingDiagnostic = adminErrorDiagnostic(loggingError);
     console.error('operation_failure_log_write_failed', {
       operation: input.operation,
+      correlationId: input.correlationId,
       actorEmail: normalizedEmail(input.actorEmail),
       message,
-      loggingMessage: loggingError instanceof globalThis.Error ? loggingError.message : 'unknown',
+      loggingCode: loggingDiagnostic.code,
+      loggingMessage: loggingDiagnostic.message,
     });
   }
 }

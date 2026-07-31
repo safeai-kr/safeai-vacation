@@ -118,7 +118,10 @@ export default function OperationHistoryManagement({ records }: { records: Admin
                   <td>{OPERATION_LABELS[log.operation] ?? log.operation}</td>
                   <td>{log.actorEmail || '-'}</td>
                   <td><strong>{log.targetType || '-'}</strong><span>{log.targetId || '-'}</span></td>
-                  <td className="log-message-cell">{log.message}</td>
+                  <td className="log-message-cell">
+                    {log.message}
+                    {log.correlationId && <span className="cell-subtext">오류 ID {log.correlationId}</span>}
+                  </td>
                   <td>{log.resolvedAt
                     ? <span className="status-badge status-approved">확인 완료</span>
                     : <span className="status-badge status-rejected">미확인</span>}</td>

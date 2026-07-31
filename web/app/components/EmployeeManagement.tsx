@@ -7,8 +7,22 @@ import Pagination, { getPageItems } from './Pagination';
 
 async function send(url: string, body: Record<string, unknown>) {
   const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const result = await response.json() as { error?: string; annualSyncWarning?: boolean; transferredTeamCount?: number };
-  if (!response.ok) throw new Error(result.error || '저장하지 못했습니다.');
+  const result = await response.json() as {
+    error?: string;
+    annualSyncWarning?: boolean;
+    transferredTeamCount?: number;
+    correlationId?: string;
+    diagnosticCode?: string;
+    technicalMessage?: string;
+  };
+  if (!response.ok) {
+    const diagnostic = [
+      result.correlationId ? `오류 ID ${result.correlationId}` : '',
+      result.diagnosticCode ? `코드 ${result.diagnosticCode}` : '',
+      result.technicalMessage ?? '',
+    ].filter(Boolean).join(' · ');
+    throw new Error(`${result.error || '저장하지 못했습니다.'}${diagnostic ? ` — ${diagnostic}` : ''}`);
+  }
   return result;
 }
 
