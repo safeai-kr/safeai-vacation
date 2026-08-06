@@ -231,7 +231,7 @@ function upsertCalendarEvent(data) {
       }) || null;
   }
 
-  const title = data.applicantName + ' · ' + data.leaveType;
+  const title = data.applicantName + ' · ' + calendarLeaveType(data);
   if (event) {
     event
       .setTitle(title)
@@ -465,13 +465,26 @@ function safeEqual(left, right) {
   return difference === 0;
 }
 
+function calendarLeaveType(data) {
+  const allowedTypes = ['연차', '오전 반차', '오후 반차'];
+  if (allowedTypes.indexOf(data.calendarLeaveType) >= 0) {
+    return data.calendarLeaveType;
+  }
+  if (data.leaveType.indexOf('오전 반차') >= 0) return '오전 반차';
+  if (data.leaveType.indexOf('오후 반차') >= 0) return '오후 반차';
+  return '연차';
+}
+
 function parseDate(value) {
   const parts = value.split('-').map(Number);
   return new Date(parts[0], parts[1] - 1, parts[2]);
 }
 
 function jsonResponse(value) {
-  return ContentService
-    .createTextOutput(JSON.stringify(value))
-    .setMimeType(ContentService.MimeType.JSON);
+  const marker = 'SAFEAI_APPS_SCRIPT_RESPONSE:';
+  const encodedResponse = Utilities.base64EncodeWebSafe(
+    JSON.stringify(value),
+    Utilities.Charset.UTF_8
+  ).replace(/=+$/, '');
+  return HtmlService.createHtmlOutput(marker + encodedResponse);
 }

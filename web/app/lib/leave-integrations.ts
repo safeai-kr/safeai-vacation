@@ -80,6 +80,14 @@ const DURATION_LABEL: Record<LeaveDuration, string> = {
   PM_HALF: '오후 반차',
 };
 
+const CALENDAR_DURATION_LABEL: Record<LeaveDuration, string> = {
+  FULL_DAY: '연차',
+  AM_HALF: '오전 반차',
+  PM_HALF: '오후 반차',
+};
+
+const APPS_SCRIPT_RESPONSE_MARKER = 'SAFEAI_APPS_SCRIPT_RESPONSE:';
+
 function requiredEnv(name: string) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} 환경변수가 필요합니다.`);
@@ -400,6 +408,26 @@ function settledOperation(
   return operation?.ok ? fulfilled() : rejected(operation?.error || fallbackMessage);
 }
 
+function parseAppsScriptResponse(responseText: string): AppsScriptBridgeResponse {
+  try {
+    return JSON.parse(responseText) as AppsScriptBridgeResponse;
+  } catch {
+    const markerIndex = responseText.indexOf(APPS_SCRIPT_RESPONSE_MARKER);
+    if (markerIndex < 0) throw new Error('응답 마커가 없습니다.');
+
+    const encodedResponse = responseText
+      .slice(markerIndex + APPS_SCRIPT_RESPONSE_MARKER.length)
+      .match(/^[A-Za-z0-9_-]+/)?.[0];
+    if (!encodedResponse) throw new Error('응답 마커가 올바르지 않습니다.');
+
+    try {
+      return JSON.parse(Buffer.from(encodedResponse, 'base64url').toString('utf8')) as AppsScriptBridgeResponse;
+    } catch {
+      throw new Error('응답 데이터를 해석할 수 없습니다.');
+    }
+  }
+}
+
 async function callAppsScript(
   request: LeaveIntegrationRequest,
   demo: boolean,
@@ -414,6 +442,7 @@ async function callAppsScript(
     startDate: request.startDate,
     endDate: request.endDate,
     leaveType: leaveTypeLabel(request),
+    calendarLeaveType: CALENDAR_DURATION_LABEL[request.duration],
     reason: request.reason || '-',
     demo,
   });
@@ -439,9 +468,10 @@ async function callAppsScript(
   const responseText = await response.text();
   let result: AppsScriptBridgeResponse;
   try {
-    result = JSON.parse(responseText) as AppsScriptBridgeResponse;
-  } catch {
-    throw new Error(`Apps Script 응답 형식이 올바르지 않습니다. HTTP ${response.status}`);
+    result = parseAppsScriptResponse(responseText);
+  } catch (error) {
+    const detail = error instanceof Error ? ` (${error.message})` : '';
+    throw new Error(`Apps Script 응답 형식이 올바르지 않습니다. HTTP ${response.status}${detail}`);
   }
 
   if (!result.result) {
