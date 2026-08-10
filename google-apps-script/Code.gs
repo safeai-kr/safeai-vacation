@@ -127,10 +127,11 @@ function sendTodayLeaveNotifications() {
 
       const applicantName = event.getTag('applicantName')
         || event.getTitle().split(' · ')[0].trim();
+      const leaveType = slackNotificationLeaveType(event);
       const startDate = event.getTag('leaveStartDate') || eventStartDate;
       const endDate = event.getTag('leaveEndDate') || inclusiveAllDayEndDate(event, timeZone);
       const message = [
-        applicantName + '님이 연차를 사용했습니다.',
+        applicantName + '님이 ' + leaveType + '를 사용했습니다.',
         '기간: ' + startDate + ' ~ ' + endDate,
       ].join('\n');
 
@@ -231,13 +232,15 @@ function upsertCalendarEvent(data) {
       }) || null;
   }
 
-  const title = data.applicantName + ' · ' + calendarLeaveType(data);
+  const calendarType = calendarLeaveType(data);
+  const title = data.applicantName + ' · ' + calendarType;
   if (event) {
     event
       .setTitle(title)
       .setAllDayDates(startDate, endDateExclusive)
       .setTag('leaveRequestId', data.requestId)
       .setTag('applicantName', data.applicantName)
+      .setTag('calendarLeaveType', calendarType)
       .setTag('leaveStartDate', data.startDate)
       .setTag('leaveEndDate', data.endDate);
     properties.setProperty(stateKey, event.getId());
@@ -252,6 +255,7 @@ function upsertCalendarEvent(data) {
   event
     .setTag('leaveRequestId', data.requestId)
     .setTag('applicantName', data.applicantName)
+    .setTag('calendarLeaveType', calendarType)
     .setTag('leaveStartDate', data.startDate)
     .setTag('leaveEndDate', data.endDate);
   properties.setProperty(stateKey, event.getId());
@@ -472,6 +476,17 @@ function calendarLeaveType(data) {
   }
   if (data.leaveType.indexOf('오전 반차') >= 0) return '오전 반차';
   if (data.leaveType.indexOf('오후 반차') >= 0) return '오후 반차';
+  return '연차';
+}
+
+function slackNotificationLeaveType(event) {
+  const calendarType = event.getTag('calendarLeaveType') || event.getTitle();
+  if (calendarType.indexOf('오전 반차') >= 0 || calendarType.indexOf('반차(오전)') >= 0) {
+    return '반차(오전)';
+  }
+  if (calendarType.indexOf('오후 반차') >= 0 || calendarType.indexOf('반차(오후)') >= 0) {
+    return '반차(오후)';
+  }
   return '연차';
 }
 
