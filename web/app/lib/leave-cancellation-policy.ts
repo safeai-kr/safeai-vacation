@@ -9,17 +9,20 @@ export function resolveCancellationPolicy({
   isApplicant,
   isAdmin,
   firstUsageDate,
+  endDate,
   today,
 }: {
   status: CancellationPolicyStatus;
   isApplicant: boolean;
   isAdmin: boolean;
   firstUsageDate: string;
+  endDate: string;
   today: string;
 }) {
   if (!isApplicant && !isAdmin) return { canCancel: false, balanceWillRestore: false };
   if (status === 'PENDING') return { canCancel: true, balanceWillRestore: true };
   if (status !== 'APPROVED') return { canCancel: false, balanceWillRestore: false };
+  if (endDate < today) return { canCancel: false, balanceWillRestore: false };
 
   const beforeUsage = firstUsageDate > today;
   return {

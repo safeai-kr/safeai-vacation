@@ -263,7 +263,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
               <div className="card-header">
                 <div>
                   <h2>전체 신청 취소</h2>
-                  <p>대기 신청은 예약을 해제하고, 승인된 신청은 사용 시작 전까지만 잔여 휴가를 복구합니다.</p>
+                  <p>대기 신청은 예약을 해제하고, 승인된 신청은 사용 시작 전에만 잔여 휴가를 복구합니다. 사용 기간이 종료된 신청은 취소할 수 없습니다.</p>
                 </div>
                 <span>처리 가능 {adminCancelableRequests.length}건</span>
               </div>

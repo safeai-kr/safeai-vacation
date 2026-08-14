@@ -96,7 +96,7 @@ function installDailyLeaveNotificationTrigger() {
 }
 
 /**
- * 오늘 시작하는 연차를 찾아 지정된 Slack 채널에 한 번씩 알립니다.
+ * 오늘 시작하는 연차를 모아 지정된 Slack 채널에 메시지 한 건으로 알립니다.
  * 트리거뿐 아니라 편집기에서 직접 실행해 테스트할 수도 있습니다.
  */
 function sendTodayLeaveNotifications() {
@@ -112,6 +112,7 @@ function sendTodayLeaveNotifications() {
     const todayDate = parseDate(today);
     const stateKey = 'SLACK_START_NOTICES_' + today;
     const sentRequestIds = parseStringArray(properties.getProperty(stateKey));
+    const pendingNotices = [];
 
     calendar.getEventsForDay(todayDate).forEach(function (event) {
       if (!event.isAllDayEvent()) return;
@@ -130,18 +131,31 @@ function sendTodayLeaveNotifications() {
       const leaveType = slackNotificationLeaveType(event);
       const startDate = event.getTag('leaveStartDate') || eventStartDate;
       const endDate = event.getTag('leaveEndDate') || inclusiveAllDayEndDate(event, timeZone);
-      const message = [
+      const notice = [
         applicantName + '님이 ' + leaveType + '를 사용했습니다.',
         '기간: ' + startDate + ' ~ ' + endDate,
       ].join('\n');
 
-      postSlackChannelMessage(message);
-      sentRequestIds.push(requestId);
-      properties.setProperty(stateKey, JSON.stringify(sentRequestIds));
+      pendingNotices.push({
+        requestId: requestId,
+        message: notice,
+      });
     });
 
+    if (pendingNotices.length > 0) {
+      const message = pendingNotices.map(function (notice) {
+        return notice.message;
+      }).join('\n\n');
+
+      postSlackChannelMessage(message);
+      pendingNotices.forEach(function (notice) {
+        sentRequestIds.push(notice.requestId);
+      });
+      properties.setProperty(stateKey, JSON.stringify(sentRequestIds));
+    }
+
     deleteExpiredSlackNoticeState(properties, todayDate);
-    console.log('오늘 시작하는 연차 알림 처리를 완료했습니다: ' + sentRequestIds.length + '건');
+    console.log('오늘 시작하는 연차 알림 처리를 완료했습니다: 신규 ' + pendingNotices.length + '건');
   } finally {
     lock.releaseLock();
   }

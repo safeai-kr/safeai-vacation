@@ -6,6 +6,7 @@ const base = {
   isApplicant: true,
   isAdmin: false,
   firstUsageDate: '2026-07-20',
+  endDate: '2026-07-20',
   today: '2026-07-17',
 };
 
@@ -43,6 +44,20 @@ test('관리자는 시작일 당일 이후 승인 신청을 기록 취소하되 
     firstUsageDate: '2026-07-17',
   }), {
     canCancel: true,
+    balanceWillRestore: false,
+  });
+});
+
+test('사용 기간이 종료된 승인 신청은 관리자도 취소할 수 없다', () => {
+  assert.deepEqual(resolveCancellationPolicy({
+    ...base,
+    status: 'APPROVED',
+    isApplicant: false,
+    isAdmin: true,
+    firstUsageDate: '2026-07-15',
+    endDate: '2026-07-16',
+  }), {
+    canCancel: false,
     balanceWillRestore: false,
   });
 });

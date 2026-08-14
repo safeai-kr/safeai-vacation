@@ -546,6 +546,7 @@ function cancellationAccess(request: LeaveRequest, viewerEmail: string, isAdmin:
     isApplicant: request.applicantEmail === normalizedEmail(viewerEmail),
     isAdmin,
     firstUsageDate,
+    endDate: request.endDate,
     today,
   });
 }
@@ -1732,14 +1733,19 @@ export async function cancelLeaveRequest(requestId: string, actorEmail: string) 
       : await transaction.get(applicantRef);
 
     const firstUsageDate = firstLeaveUsageDate(current.workDates, current.startDate);
+    const today = kstToday();
     const cancellation = resolveCancellationPolicy({
       status: current.status,
       isApplicant: current.applicantEmail === email,
       isAdmin,
       firstUsageDate,
-      today: kstToday(),
+      endDate: current.endDate,
+      today,
     });
     if (!cancellation.canCancel && current.status === 'APPROVED') {
+      if (current.endDate < today) {
+        throw new Error('사용 기간이 종료된 승인 신청은 취소할 수 없습니다.');
+      }
       throw new Error('시작일 당일 이후의 승인 신청은 관리자만 취소할 수 있습니다.');
     }
 
