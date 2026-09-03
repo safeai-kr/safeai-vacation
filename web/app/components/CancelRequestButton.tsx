@@ -38,8 +38,8 @@ export default function CancelRequestButton({
       const result = await response.json() as { error?: string; demo?: boolean };
       if (!response.ok) throw new Error(result.error || '신청을 취소하지 못했습니다.');
       if (result.demo) {
-        setState('idle');
-        setFeedback({ type: 'info', text: '데모 모드에서는 취소 결과가 저장되지 않습니다.' });
+        setState('completed');
+        router.refresh();
         return;
       }
       setState('completed');

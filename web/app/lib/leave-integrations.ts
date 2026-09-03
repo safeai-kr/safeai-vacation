@@ -6,6 +6,10 @@ import type {
   LeaveIntegrationRequest,
   LeaveSource,
 } from './leave-store';
+import {
+  slackLeaveBreakdownLabel,
+  slackLeaveTypeLabel,
+} from './leave-message-policy';
 
 export type { LeaveIntegrationRequest } from './leave-store';
 
@@ -125,12 +129,14 @@ function periodLabel(request: Pick<LeaveIntegrationRequest, 'startDate' | 'endDa
 }
 
 function slackRequestSummary(request: LeaveIntegrationRequest) {
+  const breakdown = slackLeaveBreakdownLabel(request);
   return [
     '휴가 사용 요청이 있습니다.',
     '',
     `요청자: ${request.applicantName}`,
     `기간: ${request.startDate} ~ ${request.endDate}`,
-    `종류: ${leaveTypeLabel(request)}`,
+    `종류: ${slackLeaveTypeLabel(request)}`,
+    ...(breakdown ? [`구성: ${breakdown}`] : []),
     `사유: ${request.reason || '-'}`,
   ].join('\n');
 }
@@ -263,7 +269,7 @@ export async function sendLeaveRequestSlackNotification(request: LeaveIntegratio
 
   const message = await slackApi<SlackApiResponse>('chat.postMessage', {
     channel: channelId,
-    text: `${request.applicantName}님의 ${leaveTypeLabel(request)} 승인 요청`,
+    text: `${request.applicantName}님의 ${slackLeaveTypeLabel(request)} 승인 요청`,
     blocks: slackRequestBlocks(request, actionValue),
   });
   if (!message.ts) throw new Error('Slack 메시지 식별값을 받지 못했습니다.');
@@ -364,6 +370,10 @@ export async function updateSlackDecisionMessage(input: {
 }) {
   const status = input.action === 'approve' ? '승인 완료' : '반려 완료';
   const statusEmoji = input.action === 'approve' ? '✅' : '⛔';
+  const breakdown = slackLeaveBreakdownLabel(input.request);
+  const leaveType = [slackLeaveTypeLabel(input.request), breakdown]
+    .filter(Boolean)
+    .join('\n');
   const blocks: Array<Record<string, unknown>> = [
     {
       type: 'header',
@@ -373,7 +383,7 @@ export async function updateSlackDecisionMessage(input: {
       type: 'section',
       fields: [
         { type: 'mrkdwn', text: `*신청자*\n${escapeSlackText(input.request.applicantName)}` },
-        { type: 'mrkdwn', text: `*연차 종류*\n${escapeSlackText(leaveTypeLabel(input.request))}` },
+        { type: 'mrkdwn', text: `*연차 종류*\n${escapeSlackText(leaveType)}` },
         { type: 'mrkdwn', text: `*기간*\n${escapeSlackText(periodLabel(input.request))}` },
         { type: 'mrkdwn', text: `*처리자*\n${escapeSlackText(input.actorLabel)}` },
       ],

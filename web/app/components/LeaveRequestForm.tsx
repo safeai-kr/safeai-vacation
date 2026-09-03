@@ -2,7 +2,7 @@
 
 import { FormEvent, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { hasSufficientLeaveBalance, normalizedAvailableDays } from '../lib/leave-balance-policy';
+import { calculateAnnualLeaveUsageBreakdown, hasSufficientLeaveBalance, normalizedAvailableDays } from '../lib/leave-balance-policy';
 import type { LeaveDuration, LeaveSource } from '../lib/leave-store';
 
 function today() {
@@ -27,10 +27,18 @@ function weekdayCount(startDate: string, endDate: string) {
 export default function LeaveRequestForm({
   employeeRegistered,
   annualRemainingDays,
+  annualAdvanceUsedDays,
+  annualAdvancePendingDays,
+  annualAdvanceAvailableDays,
+  annualRequestableDays,
   rewardRemainingDays,
 }: {
   employeeRegistered: boolean;
   annualRemainingDays: number;
+  annualAdvanceUsedDays: number;
+  annualAdvancePendingDays: number;
+  annualAdvanceAvailableDays: number;
+  annualRequestableDays: number;
   rewardRemainingDays: number;
 }) {
   const router = useRouter();
@@ -44,8 +52,20 @@ export default function LeaveRequestForm({
 
   const validRange = useMemo(() => Boolean(startDate && endDate && startDate <= endDate), [startDate, endDate]);
   const calculatedDays = duration === 'FULL_DAY' ? weekdayCount(startDate, endDate) : 0.5;
-  const availableDays = normalizedAvailableDays(source === 'ANNUAL' ? annualRemainingDays : rewardRemainingDays);
+  const availableDays = source === 'ANNUAL'
+    ? normalizedAvailableDays(annualRequestableDays)
+    : normalizedAvailableDays(rewardRemainingDays);
+  const annualBreakdown = calculateAnnualLeaveUsageBreakdown({
+    requestedDays: calculatedDays,
+    accruedAvailableDays: annualRemainingDays,
+  });
   const insufficientBalance = !hasSufficientLeaveBalance(calculatedDays, availableDays);
+
+  function clearFeedback() {
+    if (status === 'idle') return;
+    setStatus('idle');
+    setMessage('');
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -57,14 +77,12 @@ export default function LeaveRequestForm({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ startDate, endDate: duration === 'FULL_DAY' ? endDate : startDate, source, duration, reason }),
       });
-      const result = await response.json() as { error?: string; demo?: boolean; slackSent?: boolean };
+      const result = await response.json() as { error?: string; demo?: boolean };
       if (!response.ok) throw new Error(result.error || '신청을 저장하지 못했습니다.');
       setStatus('success');
       setMessage(result.demo
-        ? result.slackSent
-          ? '데모 승인 요청을 Slack으로 전송했습니다. 실제 Firebase에는 저장되지 않았습니다.'
-          : '데모 신청을 확인했습니다. 실제 Firebase에는 저장되지 않았습니다.'
-        : '연차 신청이 등록되었습니다.');
+        ? `데모 신청 ${calculatedDays}일이 등록되었습니다. 화면의 신청 가능 일수는 방금 신청까지 반영한 값입니다. 실제 Firebase와 Slack은 사용하지 않았습니다.`
+        : `연차 신청 ${calculatedDays}일이 등록되었습니다. 화면의 신청 가능 일수는 방금 신청까지 반영한 값입니다.`);
       setReason('');
       router.refresh();
     } catch (error) {
@@ -78,14 +96,19 @@ export default function LeaveRequestForm({
       <div className="form-row-2">
         <label className="field-label">
           차감 휴가
-          <select className="field-input" value={source} onChange={event => setSource(event.target.value as LeaveSource)}>
-            <option value="ANNUAL">정기 연차 · 잔여 {annualRemainingDays}일</option>
+          <select className="field-input" value={source} onChange={event => {
+            clearFeedback();
+            setSource(event.target.value as LeaveSource);
+          }}>
+            <option value="ANNUAL">정기/선연차 · 신청 가능 {annualRequestableDays}일</option>
             <option value="REWARD">포상휴가 · 잔여 {rewardRemainingDays}일</option>
           </select>
+          <span className="field-help">선연차 현재 사용 {annualAdvanceUsedDays}일 · 승인 대기 {annualAdvancePendingDays}일 · 추가 가능 {annualAdvanceAvailableDays}일</span>
         </label>
         <label className="field-label">
           사용 단위
           <select className="field-input" value={duration} onChange={event => {
+            clearFeedback();
             const value = event.target.value as LeaveDuration;
             setDuration(value);
             if (value !== 'FULL_DAY') setEndDate(startDate);
@@ -101,19 +124,31 @@ export default function LeaveRequestForm({
         <label className="field-label">
           시작일
           <input className="field-input" type="date" value={startDate} onChange={event => {
+            clearFeedback();
             setStartDate(event.target.value);
             if (duration !== 'FULL_DAY') setEndDate(event.target.value);
           }} required />
         </label>
         <label className="field-label">
           종료일
-          <input className="field-input" type="date" value={duration === 'FULL_DAY' ? endDate : startDate} min={startDate} onChange={event => setEndDate(event.target.value)} disabled={duration !== 'FULL_DAY'} required />
+          <input className="field-input" type="date" value={duration === 'FULL_DAY' ? endDate : startDate} min={startDate} onChange={event => {
+            clearFeedback();
+            setEndDate(event.target.value);
+          }} disabled={duration !== 'FULL_DAY'} required />
         </label>
       </div>
 
       <div className="routing-preview">
         <b>자동 계산</b>
-        <span>주말 제외 {calculatedDays}일 · {source === 'ANNUAL' ? '정기 연차' : '포상휴가'}에서 차감</span>
+        <span>
+          주말 제외 {calculatedDays}일 · {source === 'ANNUAL'
+            ? annualBreakdown.kind === 'MIXED'
+              ? `정기 연차 ${annualBreakdown.regularDays}일 + 선연차 ${annualBreakdown.advanceDays}일`
+              : annualBreakdown.kind === 'ADVANCE'
+                ? `선연차 ${annualBreakdown.advanceDays}일`
+                : `정기 연차 ${annualBreakdown.regularDays}일`
+            : '포상휴가에서 차감'}
+        </span>
       </div>
 
       <label className="field-label">
@@ -122,7 +157,10 @@ export default function LeaveRequestForm({
           className="field-input min-h-24 resize-none"
           value={reason}
           maxLength={500}
-          onChange={event => setReason(event.target.value)}
+          onChange={event => {
+            clearFeedback();
+            setReason(event.target.value);
+          }}
           placeholder="승인 담당자에게 전달할 사유를 입력해 주세요."
           required
         />
@@ -131,7 +169,7 @@ export default function LeaveRequestForm({
 
       {!validRange && <p className="form-error">종료일은 시작일보다 빠를 수 없습니다.</p>}
       {calculatedDays === 0 && validRange && <p className="form-error">선택한 기간에 사용 가능한 평일이 없습니다.</p>}
-      {calculatedDays > 0 && insufficientBalance && <p className="form-error">{source === 'ANNUAL' ? '정기 연차' : '포상휴가'} 잔여 {availableDays}일보다 많이 신청할 수 없습니다.</p>}
+      {status !== 'success' && calculatedDays > 0 && insufficientBalance && <p className="form-error">{source === 'ANNUAL' ? '발생 연차와 선연차 3일 한도를 포함한 신청 가능' : '포상휴가 잔여'} {availableDays}일보다 많이 신청할 수 없습니다.</p>}
       {!employeeRegistered && <p className="form-error">직원 등록이 완료되지 않았습니다. 관리자에게 등록을 요청해 주세요.</p>}
       {message && <p className={status === 'error' ? 'form-error' : 'form-success'} role="status">{message}</p>}
 

@@ -6,7 +6,7 @@ import {
   updateSlackDecisionMessage,
   updateSlackProcessingMessage,
 } from '../../../../lib/leave-integrations';
-import { decideLeaveRequest, recordOperationFailure } from '../../../../lib/leave-store';
+import { decideDemoLeaveRequest, decideLeaveRequest, recordOperationFailure } from '../../../../lib/leave-store';
 import { getApiSession, isDemoMode, isSameOriginRequest } from '../../../../lib/auth';
 
 export async function POST(
@@ -23,7 +23,14 @@ export async function POST(
   }
 
   const { requestId } = await params;
-  if (isDemoMode()) return NextResponse.json({ ok: true, demo: true });
+  if (isDemoMode()) {
+    try {
+      const result = decideDemoLeaveRequest(requestId, session.email, action);
+      return NextResponse.json({ ok: true, demo: true, status: result.status });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : '데모 신청을 처리하지 못했습니다.' }, { status: 400 });
+    }
+  }
 
   try {
     const result = await decideLeaveRequest(requestId, session.email, action);

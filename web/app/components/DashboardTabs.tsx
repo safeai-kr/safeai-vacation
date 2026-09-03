@@ -20,6 +20,14 @@ export function DashboardTabs({
   children: ReactNode;
 }) {
   const [activeTab, setActiveTab] = useState(initialTab);
+  const allowedTabKey = tabs.map(tab => tab.id).join(',');
+
+  useEffect(() => {
+    if (tabs.some(tab => tab.id === activeTab)) return;
+    setActiveTab(initialTab);
+    const url = initialTab === 'overview' ? window.location.pathname : `${window.location.pathname}?tab=${initialTab}`;
+    window.history.replaceState(null, '', url);
+  }, [activeTab, allowedTabKey, initialTab, tabs]);
 
   useEffect(() => {
     const handlePopState = () => {

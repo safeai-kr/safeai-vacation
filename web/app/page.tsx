@@ -9,7 +9,7 @@ import OperationHistoryManagement from './components/OperationHistoryManagement'
 import PaginatedList from './components/PaginatedList';
 import RewardLeaveManagement from './components/RewardLeaveManagement';
 import { isDemoMode, requireCompanyAccess } from './lib/auth';
-import { fetchAdminOperationRecords, fetchLeaveDashboard, LeaveDuration, LeaveRequest, LeaveSource, LeaveStatus } from './lib/leave-store';
+import { fetchAdminOperationRecords, fetchLeaveDashboard, LeaveDuration, LeaveRequest, LeaveStatus, LeaveUsageKind } from './lib/leave-store';
 
 type Tab = DashboardTab;
 type CancellableRequest = LeaveRequest & { status: Extract<LeaveStatus, 'PENDING' | 'APPROVED'> };
@@ -21,7 +21,12 @@ const STATUS_COPY: Record<LeaveStatus, { label: string; className: string }> = {
   CANCELLED: { label: '취소', className: 'status-cancelled' },
 };
 
-const SOURCE_COPY: Record<LeaveSource, string> = { ANNUAL: '정기 연차', REWARD: '포상휴가' };
+const USAGE_KIND_COPY: Record<LeaveUsageKind, string> = {
+  REGULAR: '정기 연차',
+  ADVANCE: '선연차',
+  MIXED: '정기+선연차',
+  REWARD: '포상휴가',
+};
 const DURATION_COPY: Record<LeaveDuration, string> = { FULL_DAY: '연차', AM_HALF: '오전 반차', PM_HALF: '오후 반차' };
 const POSITION_COPY = { EMPLOYEE: '직원', TEAM_LEAD: '팀장', REPRESENTATIVE: '대표' } as const;
 
@@ -41,6 +46,13 @@ function formatPeriod(startDate: string, endDate: string) {
 
 function formatTimestampDate(value: string) {
   return new Date(value).toLocaleDateString('ko-KR', { timeZone: 'Asia/Seoul' });
+}
+
+function isUnderOneYear(hireDate: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(hireDate)) return false;
+  const anniversary = new Date(`${hireDate}T00:00:00+09:00`);
+  anniversary.setFullYear(anniversary.getFullYear() + 1);
+  return Date.now() < anniversary.getTime();
 }
 
 export default async function LeaveDashboardPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
@@ -66,6 +78,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
     ? dashboard.requests.filter((request): request is CancellableRequest => (request.status === 'PENDING' || request.status === 'APPROVED') && request.canCancel)
     : [];
   const rewardEligibleEmployees = dashboard.rewardGrantEmployees;
+  const showAdvanceSummary = Boolean(myBalance && isUnderOneYear(myBalance.hireDate));
   const tabs = [
     { id: 'overview' as const, label: '연차 현황' },
     { id: 'requests' as const, label: '신청 내역' },
@@ -113,7 +126,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
       <DashboardTabs initialTab={activeTab} tabs={tabs}>
         <DashboardTabPanel tab="overview">
         <div className="tab-content">
-          <section className="summary-grid">
+          <section className={`summary-grid ${showAdvanceSummary ? 'summary-grid-with-advance' : ''}`}>
             <article className="summary-card primary-summary">
               <span>잔여 정기 연차</span>
               <strong>{myBalance ? formatDays(myBalance.annualRemainingDays) : '—'}<small>일</small></strong>
@@ -130,6 +143,13 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
               <span>승인 대기</span>
               <strong>{myBalance ? formatDays(myBalance.annualPendingDays + myBalance.rewardPendingDays) : '—'}<small>일</small></strong>
             </article>
+            {showAdvanceSummary && myBalance && (
+              <article className="summary-card advance-summary">
+                <span>선연차 현황</span>
+                <strong>{formatDays(myBalance.annualAdvanceUsedDays)}<small>일 사용</small></strong>
+                <p>승인 대기 {formatDays(myBalance.annualAdvancePendingDays)}일 · 추가 가능 {formatDays(myBalance.annualAdvanceAvailableDays)}일</p>
+              </article>
+            )}
           </section>
 
           <section className="content-card">
@@ -143,7 +163,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
             <div className="table-wrap">
               <table className="data-table">
                 <thead>
-                  <tr><th>구성원</th><th>소속</th><th>정기 부여</th><th>정기 사용</th><th>승인 대기</th><th>정기 잔여</th><th>포상 잔여</th></tr>
+                  <tr><th>구성원</th><th>소속</th><th>정기 부여</th><th>정기 사용</th><th>승인 대기</th><th>발생 잔여</th><th>선연차 사용</th><th>선연차 대기</th><th>추가 가능</th><th>신청 가능</th><th>포상 잔여</th></tr>
                 </thead>
                 <tbody>
                   {dashboard.balances.map(balance => (
@@ -153,7 +173,11 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
                       <td>{formatDays(balance.annualGrantedDays)}일</td>
                       <td>{formatDays(balance.annualUsedDays)}일</td>
                       <td>{balance.annualPendingDays + balance.rewardPendingDays > 0 ? `${formatDays(balance.annualPendingDays + balance.rewardPendingDays)}일` : '-'}</td>
-                      <td><b className="balance-value">{formatDays(balance.annualRemainingDays)}일</b></td>
+                      <td>{formatDays(balance.annualRemainingDays)}일</td>
+                      <td>{isUnderOneYear(balance.hireDate) ? `${formatDays(balance.annualAdvanceUsedDays)}일` : '-'}</td>
+                      <td>{isUnderOneYear(balance.hireDate) ? `${formatDays(balance.annualAdvancePendingDays)}일` : '-'}</td>
+                      <td>{isUnderOneYear(balance.hireDate) ? `${formatDays(balance.annualAdvanceAvailableDays)}일` : '-'}</td>
+                      <td><b className="balance-value">{formatDays(balance.annualRequestableDays)}일</b></td>
                       <td>{formatDays(balance.rewardRemainingDays)}일</td>
                     </tr>
                   ))}
@@ -176,7 +200,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
                     <tr key={request.requestId}>
                       <td><strong>{request.applicantName}</strong></td>
                       <td>{formatPeriod(request.startDate, request.endDate)} · {formatDays(request.days)}일</td>
-                      <td>{SOURCE_COPY[request.source]}</td>
+                      <td><span className={`leave-kind-badge leave-kind-${request.leaveUsageKind.toLowerCase()}`}>{USAGE_KIND_COPY[request.leaveUsageKind]}</span></td>
                       <td>{DURATION_COPY[request.duration]}</td>
                       <td><span className={`status-badge ${STATUS_COPY[request.status].className}`}>{STATUS_COPY[request.status].label}</span></td>
                     </tr>
@@ -192,7 +216,15 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
         <div className="tab-content request-layout">
           <section className="content-card form-card">
             <div className="card-header"><div><h2>연차 신청</h2><p>기간을 선택하면 주말을 제외해 사용 일수를 자동 계산합니다.</p></div></div>
-            <LeaveRequestForm employeeRegistered={dashboard.viewer.registered} annualRemainingDays={myBalance?.annualRemainingDays ?? 0} rewardRemainingDays={myBalance?.rewardRemainingDays ?? 0} />
+            <LeaveRequestForm
+              employeeRegistered={dashboard.viewer.registered}
+              annualRemainingDays={myBalance?.annualRemainingDays ?? 0}
+              annualAdvanceUsedDays={myBalance?.annualAdvanceUsedDays ?? 0}
+              annualAdvancePendingDays={myBalance?.annualAdvancePendingDays ?? 0}
+              annualAdvanceAvailableDays={myBalance?.annualAdvanceAvailableDays ?? 0}
+              annualRequestableDays={myBalance?.annualRequestableDays ?? 0}
+              rewardRemainingDays={myBalance?.rewardRemainingDays ?? 0}
+            />
           </section>
 
           <section className="content-card">
@@ -203,7 +235,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
                   <div className="request-main">
                     <div>
                       <strong>{formatPeriod(request.startDate, request.endDate)}</strong>
-                      <span>{SOURCE_COPY[request.source]} · {DURATION_COPY[request.duration]} · {formatDays(request.days)}일</span>
+                      <span><span className={`leave-kind-badge leave-kind-${request.leaveUsageKind.toLowerCase()}`}>{USAGE_KIND_COPY[request.leaveUsageKind]}</span> · {DURATION_COPY[request.duration]} · {formatDays(request.days)}일</span>
                     </div>
                     <span className={`status-badge ${STATUS_COPY[request.status].className}`}>{STATUS_COPY[request.status].label}</span>
                   </div>
@@ -248,7 +280,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
                     <div className="approval-user"><strong>{request.applicantName}</strong><span>{request.applicantEmail}</span></div>
                     <dl>
                       <div><dt>기간</dt><dd>{formatPeriod(request.startDate, request.endDate)}</dd></div>
-                      <div><dt>구분</dt><dd>{SOURCE_COPY[request.source]} · {DURATION_COPY[request.duration]} · {formatDays(request.days)}일</dd></div>
+                      <div><dt>구분</dt><dd><span className={`leave-kind-badge leave-kind-${request.leaveUsageKind.toLowerCase()}`}>{USAGE_KIND_COPY[request.leaveUsageKind]}</span> · {DURATION_COPY[request.duration]} · {formatDays(request.days)}일</dd></div>
                       <div><dt>상세 사유</dt><dd>{request.reason || '-'}</dd></div>
                     </dl>
                   </div>
@@ -274,7 +306,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
                       <div className="approval-user"><strong>{request.applicantName}</strong><span>{request.applicantEmail}</span></div>
                       <dl>
                         <div><dt>기간</dt><dd>{formatPeriod(request.startDate, request.endDate)}</dd></div>
-                        <div><dt>구분</dt><dd>{SOURCE_COPY[request.source]} · {DURATION_COPY[request.duration]} · {formatDays(request.days)}일</dd></div>
+                        <div><dt>구분</dt><dd><span className={`leave-kind-badge leave-kind-${request.leaveUsageKind.toLowerCase()}`}>{USAGE_KIND_COPY[request.leaveUsageKind]}</span> · {DURATION_COPY[request.duration]} · {formatDays(request.days)}일</dd></div>
                         <div><dt>취소 처리</dt><dd>{request.status === 'PENDING' ? '승인 대기 예약 해제' : request.cancelBalanceWillRestore ? '잔여 휴가 복구' : '사용량 유지 · 신청 상태만 취소'}</dd></div>
                         <div><dt>상세 사유</dt><dd>{request.reason || '-'}</dd></div>
                       </dl>

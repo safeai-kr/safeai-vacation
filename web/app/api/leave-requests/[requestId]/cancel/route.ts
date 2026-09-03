@@ -2,7 +2,7 @@ import { after, NextRequest, NextResponse } from 'next/server';
 import { apiErrorResponse } from '../../../../lib/api-error';
 import { getApiSession, isDemoMode, isSameOriginRequest } from '../../../../lib/auth';
 import { runCancelledLeaveIntegration } from '../../../../lib/leave-integrations';
-import { cancelLeaveRequest, recordOperationFailure } from '../../../../lib/leave-store';
+import { cancelDemoLeaveRequest, cancelLeaveRequest, recordOperationFailure } from '../../../../lib/leave-store';
 
 export async function POST(
   request: NextRequest,
@@ -14,7 +14,13 @@ export async function POST(
   const session = await getApiSession();
   if (!session) return NextResponse.json({ error: '로그인이 필요합니다.' }, { status: 401 });
   const { requestId } = await params;
-  if (isDemoMode()) return NextResponse.json({ ok: true, demo: true, status: 'CANCELLED' });
+  if (isDemoMode()) {
+    try {
+      return NextResponse.json({ ok: true, demo: true, ...cancelDemoLeaveRequest(requestId, session.email) });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : '데모 신청을 취소하지 못했습니다.' }, { status: 400 });
+    }
+  }
 
   try {
     const result = await cancelLeaveRequest(requestId, session.email);

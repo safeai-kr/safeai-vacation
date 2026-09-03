@@ -6,7 +6,13 @@ import { isDemoMode } from './auth';
 import { adminErrorDiagnostic, DomainError as Error } from './api-error';
 import { resolveApprovalRoute, type ApprovalRouteError } from './approval-routing-policy';
 import { diagnoseFirebaseConnection, firestore, type FirebaseConnectionDiagnostic } from './firebase-admin';
-import { hasSufficientLeaveBalance, normalizedAvailableDays } from './leave-balance-policy';
+import {
+  calculateAnnualLeaveAvailability,
+  calculateAnnualLeaveUsageBreakdown,
+  hasSufficientAnnualLeaveBalance,
+  remainingUnderOneYearMonthlyGrantDays,
+  type AnnualLeaveUsageKind,
+} from './leave-balance-policy';
 import { firstLeaveUsageDate, resolveCancellationPolicy } from './leave-cancellation-policy';
 import { calculateRewardReclaim, validateRewardGrantAdjustment } from './reward-grant-policy';
 
@@ -16,6 +22,7 @@ export type Permission = 'GENERAL' | 'ADMIN';
 export type EmployeeStatus = 'ACTIVE' | 'ON_LEAVE' | 'RESIGNED' | 'INACTIVE';
 export type LeaveSource = 'ANNUAL' | 'REWARD';
 export type LeaveDuration = 'FULL_DAY' | 'AM_HALF' | 'PM_HALF';
+export type LeaveUsageKind = AnnualLeaveUsageKind | 'REWARD';
 
 export interface LeaveIntegrationRequest {
   requestId: string;
@@ -28,6 +35,9 @@ export interface LeaveIntegrationRequest {
   startDate: string;
   endDate: string;
   days: number;
+  leaveUsageKind: LeaveUsageKind;
+  regularDays: number;
+  advanceDays: number;
   reason: string;
   slackChannelId?: string;
   slackMessageTs?: string;
@@ -60,6 +70,11 @@ export interface EmployeeBalance extends Employee {
   annualUsedDays: number;
   annualPendingDays: number;
   annualRemainingDays: number;
+  annualAdvanceUsedDays: number;
+  annualAdvancePendingDays: number;
+  annualAdvanceAvailableDays: number;
+  annualFutureGrantDays: number;
+  annualRequestableDays: number;
   rewardGrantedDays: number;
   rewardUsedDays: number;
   rewardPendingDays: number;
@@ -86,6 +101,10 @@ export interface LeaveRequest {
   endDate: string;
   workDates: string[];
   days: number;
+  leaveUsageKind: LeaveUsageKind;
+  regularDays: number;
+  advanceDays: number;
+  advanceUsedDaysAtDecision: number;
   reason: string;
   status: LeaveStatus;
   createdAt: string;
@@ -215,6 +234,10 @@ export interface OperationHistoryItem {
   endDate: string;
   source: LeaveSource;
   days: number;
+  leaveUsageKind: LeaveUsageKind;
+  regularDays: number;
+  advanceDays: number;
+  advanceUsedDaysAtDecision: number;
   balanceRestored: boolean;
   createdAt: string;
 }
@@ -436,18 +459,34 @@ function parseEmployee(data: FirebaseFirestore.DocumentData): Employee {
 }
 
 function parseRequest(id: string, data: FirebaseFirestore.DocumentData): LeaveRequest {
+  const source: LeaveSource = data.source === 'REWARD' ? 'REWARD' : 'ANNUAL';
+  const days = numberValue(data.days);
+  const storedUsageKind = String(data.leaveUsageKind ?? '');
+  const leaveUsageKind: LeaveUsageKind = source === 'REWARD'
+    ? 'REWARD'
+    : ['REGULAR', 'ADVANCE', 'MIXED'].includes(storedUsageKind)
+      ? storedUsageKind as AnnualLeaveUsageKind
+      : 'REGULAR';
+  const regularDays = source === 'ANNUAL'
+    ? data.regularDays === undefined ? days : numberValue(data.regularDays)
+    : 0;
+  const advanceDays = source === 'ANNUAL' ? numberValue(data.advanceDays) : 0;
   return {
     requestId: id,
     applicantEmail: normalizedEmail(data.applicantEmail),
     applicantName: String(data.applicantName ?? ''),
     approverEmail: normalizedEmail(data.approverEmail),
     approverName: String(data.approverName ?? ''),
-    source: data.source === 'REWARD' ? 'REWARD' : 'ANNUAL',
+    source,
     duration: ['AM_HALF', 'PM_HALF'].includes(data.duration) ? data.duration : 'FULL_DAY',
     startDate: String(data.startDate ?? ''),
     endDate: String(data.endDate ?? ''),
     workDates: Array.isArray(data.workDates) ? data.workDates.map(String) : [],
-    days: numberValue(data.days),
+    days,
+    leaveUsageKind,
+    regularDays,
+    advanceDays,
+    advanceUsedDaysAtDecision: numberValue(data.advanceUsedDaysAtDecision),
     reason: String(data.reason ?? ''),
     status: (data.status ?? 'PENDING') as LeaveStatus,
     createdAt: dateValue(data.createdAt),
@@ -631,17 +670,141 @@ function isRequestConflict(existing: LeaveRequest, duration: LeaveDuration, date
   return duration === existing.duration;
 }
 
+interface DemoLeaveState {
+  annualLedgerBalances: Record<string, number>;
+  requests: LeaveRequest[];
+  history: OperationHistoryItem[];
+}
+
+const demoGlobal = globalThis as typeof globalThis & { __leaveDemoState?: DemoLeaveState };
+
+function nextDemoWorkDate(offsetDays: number) {
+  let date = addDays(kstToday(), offsetDays);
+  while ([0, 6].includes(parseIsoDate(date).getUTCDay())) date = addDays(date, 1);
+  return date;
+}
+
+function demoTimestamp(offsetDays: number, hour = 9) {
+  return `${addDays(kstToday(), offsetDays)}T${String(hour).padStart(2, '0')}:00:00+09:00`;
+}
+
+function initialDemoState(): DemoLeaveState {
+  const pendingDate = nextDemoWorkDate(7);
+  const approvedAdvanceDate = nextDemoWorkDate(-35);
+  const approvedMixedDate = nextDemoWorkDate(-21);
+  const pendingRequest: LeaveRequest = {
+    requestId: 'demo-pending-mixed',
+    applicantEmail: 'member@safeai.kr',
+    applicantName: '정직원',
+    approverEmail: 'platform.lead@safeai.kr',
+    approverName: '박팀장',
+    source: 'ANNUAL',
+    duration: 'FULL_DAY',
+    startDate: pendingDate,
+    endDate: pendingDate,
+    workDates: [pendingDate],
+    days: 1,
+    leaveUsageKind: 'MIXED',
+    regularDays: 0.5,
+    advanceDays: 0.5,
+    advanceUsedDaysAtDecision: 0,
+    reason: '선연차 혼합 사용 확인',
+    status: 'PENDING',
+    createdAt: demoTimestamp(-1, 9),
+    decidedAt: '',
+    cancelledAt: '',
+    cancelledBy: '',
+    cancellationBalanceRestored: false,
+    canCancel: false,
+    cancelBalanceWillRestore: false,
+  };
+  const approvedRequests: LeaveRequest[] = [
+    {
+      ...pendingRequest,
+      requestId: 'demo-approved-advance',
+      startDate: approvedAdvanceDate,
+      endDate: approvedAdvanceDate,
+      workDates: [approvedAdvanceDate],
+      leaveUsageKind: 'ADVANCE',
+      regularDays: 0,
+      advanceDays: 1,
+      advanceUsedDaysAtDecision: 1,
+      reason: '선연차 기록 예시',
+      status: 'APPROVED',
+      createdAt: demoTimestamp(-40, 10),
+      decidedAt: demoTimestamp(-39, 11),
+    },
+    {
+      ...pendingRequest,
+      requestId: 'demo-approved-mixed',
+      startDate: approvedMixedDate,
+      endDate: approvedMixedDate,
+      workDates: [approvedMixedDate],
+      days: 1.5,
+      leaveUsageKind: 'MIXED',
+      regularDays: 1,
+      advanceDays: 0.5,
+      advanceUsedDaysAtDecision: 1.5,
+      reason: '정기 연차와 선연차 혼합 기록 예시',
+      status: 'APPROVED',
+      createdAt: demoTimestamp(-25, 9),
+      decidedAt: demoTimestamp(-24, 14),
+    },
+  ];
+  const history: OperationHistoryItem[] = approvedRequests.map((request, index) => ({
+    id: `demo-history-${index + 1}`,
+    action: 'APPROVE_REQUEST' as const,
+    actorEmail: 'platform.lead@safeai.kr',
+    requestId: request.requestId,
+    applicantEmail: request.applicantEmail,
+    applicantName: request.applicantName,
+    startDate: request.startDate,
+    endDate: request.endDate,
+    source: request.source,
+    days: request.days,
+    leaveUsageKind: request.leaveUsageKind,
+    regularDays: request.regularDays,
+    advanceDays: request.advanceDays,
+    advanceUsedDaysAtDecision: request.advanceUsedDaysAtDecision,
+    balanceRestored: false,
+    createdAt: request.decidedAt,
+  })).reverse();
+  return {
+    annualLedgerBalances: {
+      'ceo@safeai.kr': 12,
+      'platform.lead@safeai.kr': 8,
+      'member@safeai.kr': 0.5,
+    },
+    requests: [pendingRequest, ...approvedRequests],
+    history,
+  };
+}
+
+function demoState() {
+  if (!demoGlobal.__leaveDemoState) demoGlobal.__leaveDemoState = initialDemoState();
+  return demoGlobal.__leaveDemoState;
+}
+
+function demoEmployeeProfile(email: string) {
+  const normalized = normalizedEmail(email);
+  if (normalized === 'ceo@safeai.kr') return { name: '김대표', hireDate: '2022-01-03', approverEmail: normalized, approverName: '김대표', position: 'REPRESENTATIVE' as const };
+  if (normalized === 'platform.lead@safeai.kr') return { name: '박팀장', hireDate: '2024-02-01', approverEmail: 'ceo@safeai.kr', approverName: '김대표', position: 'TEAM_LEAD' as const };
+  if (normalized === 'member@safeai.kr') return { name: '정직원', hireDate: addMonths(kstToday(), -8), approverEmail: 'platform.lead@safeai.kr', approverName: '박팀장', position: 'EMPLOYEE' as const };
+  return null;
+}
+
 function demoDashboard(viewerEmail: string): LeaveDashboard {
+  const state = demoState();
   const teams: Team[] = [
     { id: 'platform', name: '플랫폼팀', managerEmail: 'platform.lead@safeai.kr', active: true },
     { id: 'ai-research', name: 'AI Research팀', managerEmail: 'research.lead@safeai.kr', active: true },
     { id: 'strategy-planning', name: '전략기획팀', managerEmail: 'strategy.lead@safeai.kr', active: true },
     { id: 'management-support', name: '경영지원팀', managerEmail: 'support.lead@safeai.kr', active: true },
   ];
-  const base: Omit<EmployeeBalance, 'teamName' | 'effectiveApproverEmail' | 'effectiveApproverName'>[] = [
+  const base: Omit<EmployeeBalance, 'teamName' | 'effectiveApproverEmail' | 'effectiveApproverName' | 'annualAdvanceUsedDays' | 'annualAdvancePendingDays' | 'annualAdvanceAvailableDays' | 'annualFutureGrantDays' | 'annualRequestableDays'>[] = [
     { email: 'ceo@safeai.kr', name: '김대표', hireDate: '2022-01-03', teamId: '', position: 'REPRESENTATIVE', permission: 'ADMIN', slackUserId: 'UCEO001', active: true, employmentStatus: 'ACTIVE', profileStatus: 'COMPLETE', openingAnnualUsedDays: 0, annualGrantedDays: 17, annualUsedDays: 5, annualPendingDays: 0, annualRemainingDays: 12, rewardGrantedDays: 2, rewardUsedDays: 1, rewardPendingDays: 0, rewardRemainingDays: 1 },
     { email: 'platform.lead@safeai.kr', name: '박팀장', hireDate: '2024-02-01', teamId: 'platform', position: 'TEAM_LEAD', permission: 'GENERAL', slackUserId: 'UPL001', active: true, employmentStatus: 'ACTIVE', profileStatus: 'COMPLETE', openingAnnualUsedDays: 2, annualGrantedDays: 15, annualUsedDays: 7, annualPendingDays: 1, annualRemainingDays: 7, rewardGrantedDays: 1, rewardUsedDays: 0, rewardPendingDays: 0, rewardRemainingDays: 1 },
-    { email: 'member@safeai.kr', name: '정직원', hireDate: '2026-01-15', teamId: 'platform', position: 'EMPLOYEE', permission: 'GENERAL', slackUserId: 'UMEMBER01', active: true, employmentStatus: 'ACTIVE', profileStatus: 'COMPLETE', openingAnnualUsedDays: 1, annualGrantedDays: 6, annualUsedDays: 1, annualPendingDays: 1, annualRemainingDays: 4, rewardGrantedDays: 1, rewardUsedDays: 0.5, rewardPendingDays: 0, rewardRemainingDays: 0.5 },
+    { email: 'member@safeai.kr', name: '정직원', hireDate: addMonths(kstToday(), -8), teamId: 'platform', position: 'EMPLOYEE', permission: 'GENERAL', slackUserId: 'UMEMBER01', active: true, employmentStatus: 'ACTIVE', profileStatus: 'COMPLETE', openingAnnualUsedDays: 0, annualGrantedDays: 8, annualUsedDays: 7.5, annualPendingDays: 0, annualRemainingDays: 0.5, rewardGrantedDays: 1, rewardUsedDays: 0.5, rewardPendingDays: 0, rewardRemainingDays: 0.5 },
   ];
   const employeeDirectory: Employee[] = base.map(employee => ({
     email: employee.email,
@@ -661,12 +824,32 @@ function demoDashboard(viewerEmail: string): LeaveDashboard {
       ...employee,
       teamName: teams.find(team => team.id === employee.teamId)?.name ?? '',
     };
+    const annualPendingDays = state.requests
+      .filter(request => request.applicantEmail === employee.email && request.source === 'ANNUAL' && request.status === 'PENDING')
+      .reduce((sum, request) => sum + request.days, 0);
+    const ledgerBalanceDays = state.annualLedgerBalances[employee.email]
+      ?? employee.annualRemainingDays + employee.annualPendingDays;
+    const annualAvailability = calculateAnnualLeaveAvailability({
+      ledgerBalanceDays,
+      pendingDays: annualPendingDays,
+      futureMonthlyGrantDays: remainingUnderOneYearMonthlyGrantDays(employee.hireDate, kstToday()),
+    });
     const approver = effectiveApprover(full, teams, employeeDirectory);
-    return { ...full, effectiveApproverEmail: approver.email, effectiveApproverName: approver.name };
+    return {
+      ...full,
+      annualUsedDays: Math.max(employee.annualGrantedDays - ledgerBalanceDays, 0),
+      annualPendingDays,
+      annualRemainingDays: annualAvailability.accruedRemainingDays,
+      annualAdvanceUsedDays: annualAvailability.advanceUsedDays,
+      annualAdvancePendingDays: annualAvailability.advancePendingDays,
+      annualAdvanceAvailableDays: annualAvailability.advanceAvailableDays,
+      annualFutureGrantDays: annualAvailability.futureMonthlyGrantDays,
+      annualRequestableDays: annualAvailability.requestableDays,
+      effectiveApproverEmail: approver.email,
+      effectiveApproverName: approver.name,
+    };
   });
-  const requests: LeaveRequest[] = [
-    { requestId: 'demo-1', applicantEmail: 'member@safeai.kr', applicantName: '정직원', approverEmail: 'platform.lead@safeai.kr', approverName: '박팀장', source: 'ANNUAL', duration: 'FULL_DAY', startDate: '2026-07-20', endDate: '2026-07-20', workDates: ['2026-07-20'], days: 1, reason: '가족 일정', status: 'PENDING', createdAt: '2026-07-14T09:20:00+09:00', decidedAt: '', cancelledAt: '', cancelledBy: '', cancellationBalanceRestored: false, canCancel: false, cancelBalanceWillRestore: false },
-  ];
+  const requests = [...state.requests].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const rewardGrants: RewardGrantView[] = [
     { id: 'reward-demo-1', employeeEmail: 'member@safeai.kr', employeeName: '정직원', employeeActive: true, employeeStatus: 'ACTIVE', grantedDays: 1, usedDays: 0.5, reservedDays: 0, remainingDays: 0.5, grantedOn: '2026-07-01', expiresOn: '2026-08-31', memo: '프로젝트 기여 포상', createdBy: 'platform.lead@safeai.kr', createdAt: '2026-07-01T09:00:00+09:00', active: true, reclaimedDays: 0, reclaimedAt: '', reclaimedBy: '', updatedAt: '', updatedBy: '', mutationVersion: 1 },
   ];
@@ -702,6 +885,181 @@ function demoDashboard(viewerEmail: string): LeaveDashboard {
       rewardGrantEmployeeEmails,
     },
   };
+}
+
+export function createDemoLeaveRequest(actor: { email: string; name: string }, input: NewLeaveRequestInput) {
+  const state = demoState();
+  const email = normalizedEmail(actor.email);
+  const employee = demoEmployeeProfile(email);
+  if (!employee) throw new Error('데모 직원 정보를 찾을 수 없습니다.');
+  const dates = workDates(input);
+  const days = input.duration === 'FULL_DAY' ? dates.length : 0.5;
+  if (state.requests.some(request => request.applicantEmail === email && isRequestConflict(request, input.duration, dates))) {
+    throw new Error('같은 날짜와 시간대에 이미 승인 또는 대기 중인 신청이 있습니다.');
+  }
+
+  let leaveUsageKind: LeaveUsageKind = input.source === 'REWARD' ? 'REWARD' : 'REGULAR';
+  let regularDays = input.source === 'ANNUAL' ? days : 0;
+  let advanceDays = 0;
+  let advanceUsedDaysAtDecision = 0;
+  if (input.source === 'ANNUAL') {
+    const ledgerBalanceDays = state.annualLedgerBalances[email] ?? 0;
+    const pendingDays = state.requests
+      .filter(request => request.applicantEmail === email && request.source === 'ANNUAL' && request.status === 'PENDING')
+      .reduce((sum, request) => sum + request.days, 0);
+    const availability = calculateAnnualLeaveAvailability({
+      ledgerBalanceDays,
+      pendingDays,
+      futureMonthlyGrantDays: remainingUnderOneYearMonthlyGrantDays(employee.hireDate, kstToday()),
+    });
+    if (!hasSufficientAnnualLeaveBalance(days, availability)) {
+      throw new Error(`선연차 한도를 포함해 신청 가능한 정기 연차는 ${availability.requestableDays}일입니다.`);
+    }
+    const breakdown = calculateAnnualLeaveUsageBreakdown({ requestedDays: days, accruedAvailableDays: availability.accruedRemainingDays });
+    leaveUsageKind = breakdown.kind;
+    regularDays = breakdown.regularDays;
+    advanceDays = breakdown.advanceDays;
+    if (advanceDays > 0.0001 && dates.some(date => date >= addYears(employee.hireDate, 1))) {
+      throw new Error('선연차 사용분은 입사 1주년 전 날짜에만 신청할 수 있습니다.');
+    }
+  } else {
+    const pendingRewardDays = state.requests
+      .filter(request => request.applicantEmail === email && request.source === 'REWARD' && request.status === 'PENDING')
+      .reduce((sum, request) => sum + request.days, 0);
+    if (days > Math.max(0.5 - pendingRewardDays, 0)) throw new Error('사용 가능한 포상휴가가 부족합니다.');
+  }
+
+  const autoApproved = employee.position === 'REPRESENTATIVE';
+  if (autoApproved && input.source === 'ANNUAL') {
+    state.annualLedgerBalances[email] = (state.annualLedgerBalances[email] ?? 0) - days;
+    advanceUsedDaysAtDecision = Math.max(-state.annualLedgerBalances[email], 0);
+  }
+  const requestId = `demo-${crypto.randomUUID()}`;
+  const now = new Date().toISOString();
+  const request: LeaveRequest = {
+    requestId,
+    applicantEmail: email,
+    applicantName: employee.name || actor.name,
+    approverEmail: employee.approverEmail,
+    approverName: employee.approverName,
+    source: input.source,
+    duration: input.duration,
+    startDate: input.startDate,
+    endDate: input.duration === 'FULL_DAY' ? input.endDate : input.startDate,
+    workDates: dates,
+    days,
+    leaveUsageKind,
+    regularDays,
+    advanceDays,
+    advanceUsedDaysAtDecision,
+    reason: input.reason.trim(),
+    status: autoApproved ? 'APPROVED' : 'PENDING',
+    createdAt: now,
+    decidedAt: autoApproved ? now : '',
+    cancelledAt: '',
+    cancelledBy: '',
+    cancellationBalanceRestored: false,
+    canCancel: false,
+    cancelBalanceWillRestore: false,
+  };
+  state.requests.unshift(request);
+  if (autoApproved) state.history.unshift(demoHistoryItem(request, email, 'AUTO_APPROVE_REPRESENTATIVE'));
+  return { requestId, autoApproved };
+}
+
+function demoHistoryItem(
+  request: LeaveRequest,
+  actorEmail: string,
+  action: OperationHistoryItem['action'],
+  balanceRestored = false,
+): OperationHistoryItem {
+  return {
+    id: `demo-history-${crypto.randomUUID()}`,
+    action,
+    actorEmail,
+    requestId: request.requestId,
+    applicantEmail: request.applicantEmail,
+    applicantName: request.applicantName,
+    startDate: request.startDate,
+    endDate: request.endDate,
+    source: request.source,
+    days: request.days,
+    leaveUsageKind: request.leaveUsageKind,
+    regularDays: request.regularDays,
+    advanceDays: request.advanceDays,
+    advanceUsedDaysAtDecision: request.advanceUsedDaysAtDecision,
+    balanceRestored,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export function decideDemoLeaveRequest(requestId: string, actorEmail: string, action: 'approve' | 'reject') {
+  const state = demoState();
+  const email = normalizedEmail(actorEmail);
+  const request = state.requests.find(item => item.requestId === requestId);
+  if (!request) throw new Error('데모 신청 내역을 찾을 수 없습니다.');
+  if (request.status !== 'PENDING') throw new Error('이미 처리된 신청입니다.');
+  if (request.approverEmail !== email) throw new Error('이 신청의 담당 승인자가 아닙니다.');
+
+  if (action === 'approve' && request.source === 'ANNUAL') {
+    const employee = demoEmployeeProfile(request.applicantEmail);
+    const ledgerBalanceDays = state.annualLedgerBalances[request.applicantEmail] ?? 0;
+    const pendingDays = state.requests
+      .filter(item => item.applicantEmail === request.applicantEmail && item.source === 'ANNUAL' && item.status === 'PENDING')
+      .reduce((sum, item) => sum + item.days, 0);
+    const availability = calculateAnnualLeaveAvailability({
+      ledgerBalanceDays,
+      pendingDays: 0,
+      futureMonthlyGrantDays: remainingUnderOneYearMonthlyGrantDays(employee?.hireDate ?? '', kstToday()),
+    });
+    if (!hasSufficientAnnualLeaveBalance(pendingDays, availability)) {
+      throw new Error('선연차 한도가 부족하여 현재 승인 대기 중인 정기 연차를 승인할 수 없습니다.');
+    }
+    const breakdown = calculateAnnualLeaveUsageBreakdown({ requestedDays: request.days, accruedAvailableDays: Math.max(ledgerBalanceDays, 0) });
+    request.leaveUsageKind = breakdown.kind;
+    request.regularDays = breakdown.regularDays;
+    request.advanceDays = breakdown.advanceDays;
+    state.annualLedgerBalances[request.applicantEmail] = ledgerBalanceDays - request.days;
+    request.advanceUsedDaysAtDecision = Math.max(-state.annualLedgerBalances[request.applicantEmail], 0);
+  }
+  request.status = action === 'approve' ? 'APPROVED' : 'REJECTED';
+  request.decidedAt = new Date().toISOString();
+  state.history.unshift(demoHistoryItem(request, email, action === 'approve' ? 'APPROVE_REQUEST' : 'REJECT_REQUEST'));
+  return { status: request.status };
+}
+
+export function cancelDemoLeaveRequest(requestId: string, actorEmail: string) {
+  const state = demoState();
+  const email = normalizedEmail(actorEmail);
+  const request = state.requests.find(item => item.requestId === requestId);
+  if (!request) throw new Error('데모 신청 내역을 찾을 수 없습니다.');
+  if (request.status !== 'PENDING' && request.status !== 'APPROVED') throw new Error('현재 상태에서는 신청을 취소할 수 없습니다.');
+  const actor = demoEmployeeProfile(email);
+  if (request.applicantEmail !== email && actor?.position !== 'REPRESENTATIVE') throw new Error('이 신청을 취소할 권한이 없습니다.');
+  const cancellation = resolveCancellationPolicy({
+    status: request.status,
+    isApplicant: request.applicantEmail === email,
+    isAdmin: actor?.position === 'REPRESENTATIVE',
+    firstUsageDate: firstLeaveUsageDate(request.workDates, request.startDate),
+    endDate: request.endDate,
+    today: kstToday(),
+  });
+  if (!cancellation.canCancel) throw new Error('현재 시점에는 이 신청을 취소할 수 없습니다.');
+  const previousStatus = request.status;
+  if (previousStatus === 'APPROVED' && request.source === 'ANNUAL' && cancellation.balanceWillRestore) {
+    state.annualLedgerBalances[request.applicantEmail] = (state.annualLedgerBalances[request.applicantEmail] ?? 0) + request.days;
+  }
+  request.status = 'CANCELLED';
+  request.cancelledAt = new Date().toISOString();
+  request.cancelledBy = email;
+  request.cancellationBalanceRestored = cancellation.balanceWillRestore;
+  state.history.unshift(demoHistoryItem(
+    request,
+    email,
+    previousStatus === 'PENDING' ? 'CANCEL_PENDING_REQUEST' : 'CANCEL_APPROVED_REQUEST',
+    cancellation.balanceWillRestore,
+  ));
+  return { status: 'CANCELLED' as const, balanceRestored: cancellation.balanceWillRestore, alreadyCancelled: false };
 }
 
 export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDashboard> {
@@ -766,6 +1124,11 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
       const annualBalance = employeeLedger.reduce((sum, entry) => sum + numberValue(entry.days), 0);
       const openingAnnualUsedDays = Math.abs(employeeLedger.filter(entry => entry.entryType === 'OPENING_USAGE').reduce((sum, entry) => sum + numberValue(entry.days), 0));
       const annualPendingDays = requests.filter(request => request.applicantEmail === employee.email && request.source === 'ANNUAL' && request.status === 'PENDING').reduce((sum, request) => sum + request.days, 0);
+      const annualAvailability = calculateAnnualLeaveAvailability({
+        ledgerBalanceDays: annualBalance,
+        pendingDays: annualPendingDays,
+        futureMonthlyGrantDays: remainingUnderOneYearMonthlyGrantDays(employee.hireDate, today),
+      });
       const employeeGrants = grants.filter(grant => grant.employeeEmail === employee.email && grant.active && grant.grantedOn <= today && grant.expiresOn >= today);
       const validGrantIds = new Set(employeeGrants.map(grant => grant.id));
       const employeeAllocations = allocations.filter(allocation => validGrantIds.has(allocation.rewardGrantId));
@@ -780,7 +1143,12 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
         annualGrantedDays,
         annualUsedDays,
         annualPendingDays,
-        annualRemainingDays: annualBalance - annualPendingDays,
+        annualRemainingDays: annualAvailability.accruedRemainingDays,
+        annualAdvanceUsedDays: annualAvailability.advanceUsedDays,
+        annualAdvancePendingDays: annualAvailability.advancePendingDays,
+        annualAdvanceAvailableDays: annualAvailability.advanceAvailableDays,
+        annualFutureGrantDays: annualAvailability.futureMonthlyGrantDays,
+        annualRequestableDays: annualAvailability.requestableDays,
         rewardGrantedDays,
         rewardUsedDays,
         rewardPendingDays,
@@ -1043,9 +1411,13 @@ export async function upsertEmployee(actorEmail: string, input: EmployeeInput) {
         .filter(request => request.status === 'PENDING' && request.source === 'ANNUAL')
         .reduce((sum, request) => sum + numberValue(request.days), 0);
       const annualBalanceAfterUpdate = annualBalanceWithoutOpeningUsage - input.openingAnnualUsedDays;
-      const availableAfterUpdate = annualBalanceAfterUpdate - pendingAnnualDays;
-      if (!hasSufficientLeaveBalance(pendingAnnualDays, annualBalanceAfterUpdate)) {
-        throw new Error(`기존 사용 연차를 반영하면 승인 대기분을 제외한 정기 연차가 ${normalizedAvailableDays(availableAfterUpdate)}일이 됩니다. 대기 신청을 먼저 처리하거나 기존 사용 연차를 확인해 주세요.`);
+      const annualAvailabilityAfterUpdate = calculateAnnualLeaveAvailability({
+        ledgerBalanceDays: annualBalanceAfterUpdate,
+        pendingDays: 0,
+        futureMonthlyGrantDays: remainingUnderOneYearMonthlyGrantDays(input.hireDate, kstToday()),
+      });
+      if (!hasSufficientAnnualLeaveBalance(pendingAnnualDays, annualAvailabilityAfterUpdate)) {
+        throw new Error(`기존 사용 연차를 반영하면 선연차 3일 한도를 포함한 신청 가능 연차가 ${annualAvailabilityAfterUpdate.requestableDays}일이 됩니다. 대기 신청을 먼저 처리하거나 기존 사용 연차를 확인해 주세요.`);
       }
     }
     const wasEffectiveAdmin = hasAdminAccess(email, employeeSnapshot.data());
@@ -1427,6 +1799,9 @@ function integrationRequestFromData(
     startDate: request.startDate,
     endDate: request.endDate,
     days: request.days,
+    leaveUsageKind: request.leaveUsageKind,
+    regularDays: request.regularDays,
+    advanceDays: request.advanceDays,
     reason: request.reason,
     slackChannelId: String(data.slackChannelId ?? ''),
     slackMessageTs: String(data.slackMessageTs ?? ''),
@@ -1484,12 +1859,34 @@ export async function createLeaveRequest(actor: { email: string; name: string },
     if (existing.some(request => isRequestConflict(request, input.duration, dates))) throw new Error('같은 날짜와 시간대에 이미 승인 또는 대기 중인 신청이 있습니다.');
 
     let rewardPlan: ReturnType<typeof allocationPlan> = [];
+    let leaveUsageKind: LeaveUsageKind = input.source === 'REWARD' ? 'REWARD' : 'REGULAR';
+    let regularDays = input.source === 'ANNUAL' ? days : 0;
+    let advanceDays = 0;
+    let advanceUsedDaysAtDecision = 0;
     if (input.source === 'ANNUAL') {
       const ledgerSnapshot = await transaction.get(db.collection('leave_ledger').where('employeeEmail', '==', email));
       const annualBalance = ledgerSnapshot.docs.filter(doc => doc.data().source === 'ANNUAL').reduce((sum, doc) => sum + numberValue(doc.data().days), 0);
       const pendingDays = existing.filter(request => request.source === 'ANNUAL' && request.status === 'PENDING').reduce((sum, request) => sum + request.days, 0);
-      const availableDays = annualBalance - pendingDays;
-      if (!hasSufficientLeaveBalance(days, availableDays)) throw new Error(`신청 가능한 정기 연차는 ${normalizedAvailableDays(availableDays)}일입니다.`);
+      const annualAvailability = calculateAnnualLeaveAvailability({
+        ledgerBalanceDays: annualBalance,
+        pendingDays,
+        futureMonthlyGrantDays: remainingUnderOneYearMonthlyGrantDays(currentEmployee.hireDate, kstToday()),
+      });
+      if (!hasSufficientAnnualLeaveBalance(days, annualAvailability)) {
+        throw new Error(`선연차 3일 한도를 포함해 신청 가능한 정기 연차는 ${annualAvailability.requestableDays}일입니다.`);
+      }
+      const breakdown = calculateAnnualLeaveUsageBreakdown({
+        requestedDays: days,
+        accruedAvailableDays: annualAvailability.accruedRemainingDays,
+      });
+      leaveUsageKind = breakdown.kind;
+      regularDays = breakdown.regularDays;
+      advanceDays = breakdown.advanceDays;
+      const firstAnniversary = addYears(currentEmployee.hireDate, 1);
+      if (advanceDays > 0.0001 && dates.some(date => date >= firstAnniversary)) {
+        throw new Error('선연차 사용분은 입사 1주년 전 날짜에만 신청할 수 있습니다.');
+      }
+      if (autoApproved) advanceUsedDaysAtDecision = Math.max(-(annualBalance - days), 0);
     } else {
       const [grantSnapshot, allocationSnapshot] = await Promise.all([
         transaction.get(db.collection('reward_grants').where('employeeEmail', '==', email)),
@@ -1512,6 +1909,10 @@ export async function createLeaveRequest(actor: { email: string; name: string },
       endDate: input.duration === 'FULL_DAY' ? input.endDate : input.startDate,
       workDates: dates,
       days,
+      leaveUsageKind,
+      regularDays,
+      advanceDays,
+      advanceUsedDaysAtDecision,
       reason: input.reason.trim(),
       status: autoApproved ? 'APPROVED' : 'PENDING',
       createdAt: FieldValue.serverTimestamp(),
@@ -1530,6 +1931,9 @@ export async function createLeaveRequest(actor: { email: string; name: string },
       startDate: input.startDate,
       endDate: input.duration === 'FULL_DAY' ? input.endDate : input.startDate,
       days,
+      leaveUsageKind,
+      regularDays,
+      advanceDays,
       reason: input.reason.trim(),
     };
 
@@ -1561,6 +1965,10 @@ export async function createLeaveRequest(actor: { email: string; name: string },
       action: autoApproved ? 'AUTO_APPROVE_REPRESENTATIVE' : 'CREATE_REQUEST',
       targetType: 'LEAVE_REQUEST',
       targetId: ref.id,
+      leaveUsageKind,
+      regularDays,
+      advanceDays,
+      advanceUsedDaysAtDecision,
       createdAt: FieldValue.serverTimestamp(),
     });
   });
@@ -1576,6 +1984,12 @@ export async function decideLeaveRequest(requestId: string, actorEmail: string, 
   const actorRef = db.collection('employees').doc(email);
   const auditRef = db.collection('audit_logs').doc(ledgerId(`DECIDE_REQUEST:${requestId}`));
   let integrationRequest: LeaveIntegrationRequest | null = null;
+  if (action === 'approve') {
+    const requestSnapshot = await ref.get();
+    if (requestSnapshot.exists && requestSnapshot.data()?.source === 'ANNUAL' && requestSnapshot.data()?.status === 'PENDING') {
+      await syncAnnualGrants(normalizedEmail(requestSnapshot.data()?.applicantEmail));
+    }
+  }
   await db.runTransaction(async transaction => {
     const [requestDoc, actorDoc] = await Promise.all([
       transaction.get(ref),
@@ -1606,6 +2020,10 @@ export async function decideLeaveRequest(requestId: string, actorEmail: string, 
     const allocationSnapshot = current.source === 'REWARD'
       ? await transaction.get(db.collection('reward_allocations').where('requestId', '==', requestId))
       : null;
+    let decisionUsageKind = current.leaveUsageKind;
+    let decisionRegularDays = current.regularDays;
+    let decisionAdvanceDays = current.advanceDays;
+    let advanceUsedDaysAtDecision = current.advanceUsedDaysAtDecision;
     if (current.source === 'ANNUAL' && action === 'approve') {
       const [ledgerSnapshot, pendingSnapshot] = await Promise.all([
         transaction.get(db.collection('leave_ledger').where('employeeEmail', '==', current.applicantEmail)),
@@ -1618,8 +2036,30 @@ export async function decideLeaveRequest(requestId: string, actorEmail: string, 
         .map(doc => parseRequest(doc.id, doc.data()))
         .filter(request => request.source === 'ANNUAL' && request.status === 'PENDING')
         .reduce((sum, request) => sum + request.days, 0);
-      if (!hasSufficientLeaveBalance(pendingDays, annualBalance)) {
-        throw new Error('현재 정기 연차 잔액이 승인 대기 예약보다 부족하여 승인할 수 없습니다.');
+      const annualAvailability = calculateAnnualLeaveAvailability({
+        ledgerBalanceDays: annualBalance,
+        pendingDays: 0,
+        futureMonthlyGrantDays: remainingUnderOneYearMonthlyGrantDays(
+          String(applicantDoc.data()?.hireDate ?? ''),
+          kstToday(),
+        ),
+      });
+      if (!hasSufficientAnnualLeaveBalance(pendingDays, annualAvailability)) {
+        throw new Error('선연차 3일 한도가 부족하여 현재 승인 대기 중인 정기 연차를 승인할 수 없습니다.');
+      }
+      const breakdown = calculateAnnualLeaveUsageBreakdown({
+        requestedDays: current.days,
+        accruedAvailableDays: Math.max(annualBalance, 0),
+      });
+      decisionUsageKind = breakdown.kind;
+      decisionRegularDays = breakdown.regularDays;
+      decisionAdvanceDays = breakdown.advanceDays;
+      advanceUsedDaysAtDecision = Math.max(-(annualBalance - current.days), 0);
+      if (decisionAdvanceDays > 0.0001) {
+        const firstAnniversary = addYears(String(applicantDoc.data()?.hireDate ?? ''), 1);
+        if (current.workDates.some(date => date >= firstAnniversary)) {
+          throw new Error('선연차 사용분은 입사 1주년 전 날짜에만 승인할 수 있습니다.');
+        }
       }
     }
 
@@ -1638,7 +2078,15 @@ export async function decideLeaveRequest(requestId: string, actorEmail: string, 
       }
       allocationDocs.forEach(allocation => transaction.update(allocation.ref, { status: action === 'approve' ? 'USED' : 'CANCELLED', updatedAt: FieldValue.serverTimestamp() }));
     }
-    transaction.update(ref, { status: action === 'approve' ? 'APPROVED' : 'REJECTED', decidedAt: FieldValue.serverTimestamp(), decidedBy: email });
+    transaction.update(ref, {
+      status: action === 'approve' ? 'APPROVED' : 'REJECTED',
+      decidedAt: FieldValue.serverTimestamp(),
+      decidedBy: email,
+      leaveUsageKind: decisionUsageKind,
+      regularDays: decisionRegularDays,
+      advanceDays: decisionAdvanceDays,
+      advanceUsedDaysAtDecision,
+    });
     transaction.update(applicantRef, {
       leaveMutationVersion: FieldValue.increment(1),
       leaveMutationAt: FieldValue.serverTimestamp(),
@@ -1651,10 +2099,17 @@ export async function decideLeaveRequest(requestId: string, actorEmail: string, 
       targetId: requestId,
       before: { status: 'PENDING' },
       after: { status: action === 'approve' ? 'APPROVED' : 'REJECTED' },
+      leaveUsageKind: decisionUsageKind,
+      regularDays: decisionRegularDays,
+      advanceDays: decisionAdvanceDays,
+      advanceUsedDaysAtDecision,
       createdAt: FieldValue.serverTimestamp(),
     });
     integrationRequest = {
       ...integrationRequestFromData(requestId, requestDoc.data() ?? {}),
+      leaveUsageKind: decisionUsageKind,
+      regularDays: decisionRegularDays,
+      advanceDays: decisionAdvanceDays,
     };
   });
   const completedIntegrationRequest = integrationRequest as LeaveIntegrationRequest | null;
@@ -1835,6 +2290,10 @@ export async function cancelLeaveRequest(requestId: string, actorEmail: string) 
       targetId: requestId,
       before: { status: current.status },
       after: { status: 'CANCELLED', balanceRestored: balanceWillRestore },
+      leaveUsageKind: current.leaveUsageKind,
+      regularDays: current.regularDays,
+      advanceDays: current.advanceDays,
+      advanceUsedDaysAtDecision: current.advanceUsedDaysAtDecision,
       createdAt: FieldValue.serverTimestamp(),
     });
 
@@ -1860,7 +2319,7 @@ export async function fetchAdminOperationRecords(
   actorEmail: string,
   requests: LeaveRequest[],
 ): Promise<AdminOperationRecords> {
-  if (isDemoMode()) return { history: [], failures: [] };
+  if (isDemoMode()) return { history: [...demoState().history], failures: [] };
   await requireAdmin(actorEmail);
   const db = firestore();
   const [auditSnapshot, failureSnapshot] = await Promise.all([
@@ -1885,6 +2344,17 @@ export async function fetchAdminOperationRecords(
       endDate: request?.endDate ?? '',
       source: request?.source ?? 'ANNUAL',
       days: request?.days ?? 0,
+      leaveUsageKind: data.leaveUsageKind === 'REWARD'
+        || data.leaveUsageKind === 'ADVANCE'
+        || data.leaveUsageKind === 'MIXED'
+        || data.leaveUsageKind === 'REGULAR'
+        ? data.leaveUsageKind as LeaveUsageKind
+        : request?.leaveUsageKind ?? 'REGULAR',
+      regularDays: data.regularDays === undefined ? request?.regularDays ?? request?.days ?? 0 : numberValue(data.regularDays),
+      advanceDays: data.advanceDays === undefined ? request?.advanceDays ?? 0 : numberValue(data.advanceDays),
+      advanceUsedDaysAtDecision: data.advanceUsedDaysAtDecision === undefined
+        ? request?.advanceUsedDaysAtDecision ?? 0
+        : numberValue(data.advanceUsedDaysAtDecision),
       balanceRestored: data.after?.balanceRestored === true,
       createdAt: dateValue(data.createdAt),
     }];

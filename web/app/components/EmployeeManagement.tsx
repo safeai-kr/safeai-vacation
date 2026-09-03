@@ -223,7 +223,10 @@ export default function EmployeeManagement({ teams, employees }: { teams: Team[]
                 <td>{employee.teamName || '-'}</td>
                 <td>{employee.hireDate || '미등록'}</td>
                 <td>{employee.slackUserId || '-'}</td>
-                <td className="leave-balance-cell"><b className="balance-value">{formatDays(employee.annualRemainingDays)}일</b><span>부여 {formatDays(employee.annualGrantedDays)} · 사용 {formatDays(employee.annualUsedDays)}</span></td>
+                <td className="leave-balance-cell">
+                  <b className="balance-value">신청 가능 {formatDays(employee.annualRequestableDays)}일</b>
+                  <span>발생 잔여 {formatDays(employee.annualRemainingDays)} · 선연차 사용 {formatDays(employee.annualAdvanceUsedDays)} · 대기 {formatDays(employee.annualAdvancePendingDays)}</span>
+                </td>
                 <td>{formatDays(employee.rewardRemainingDays)}일</td>
                 <td>{!employee.active ? '-' : employee.position === 'REPRESENTATIVE' ? '자동 승인' : employee.effectiveApproverName || employee.effectiveApproverEmail || '미지정'}</td>
                 <td><button type="button" className="secondary-button" onClick={() => editEmployee(employee)}>수정</button></td>

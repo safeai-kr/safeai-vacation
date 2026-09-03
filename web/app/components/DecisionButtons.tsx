@@ -28,8 +28,8 @@ export default function DecisionButtons({ requestId }: { requestId: string }) {
   }
 
   return (
-    <div className="mt-4">
-      <div className="flex gap-2">
+    <div className="decision-control">
+      <div>
         <button className="approve-button" disabled={Boolean(loading)} onClick={() => decide('approve')}>
           {loading === 'approve' ? '처리 중…' : '승인'}
         </button>
@@ -37,7 +37,7 @@ export default function DecisionButtons({ requestId }: { requestId: string }) {
           {loading === 'reject' ? '처리 중…' : '반려'}
         </button>
       </div>
-      {error && <p className="form-error mt-2">{error}</p>}
+      {error && <p className="form-error">{error}</p>}
     </div>
   );
 }

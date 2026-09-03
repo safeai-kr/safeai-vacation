@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { formatKstDateTime } from '../lib/date-format';
-import type { AdminOperationRecords, LeaveSource, OperationHistoryItem } from '../lib/leave-store';
+import type { AdminOperationRecords, LeaveUsageKind, OperationHistoryItem } from '../lib/leave-store';
 import Pagination, { getPageItems } from './Pagination';
 
 const ACTION_LABELS: Record<OperationHistoryItem['action'], string> = {
@@ -29,7 +29,12 @@ const OPERATION_LABELS: Record<string, string> = {
   DELETE_CALENDAR_EVENT: '캘린더 일정 삭제',
 };
 
-const SOURCE_LABELS: Record<LeaveSource, string> = { ANNUAL: '정기 연차', REWARD: '포상휴가' };
+const USAGE_KIND_LABELS: Record<LeaveUsageKind, string> = {
+  REGULAR: '정기 연차',
+  ADVANCE: '선연차',
+  MIXED: '정기+선연차',
+  REWARD: '포상휴가',
+};
 
 function formatPeriod(startDate: string, endDate: string) {
   if (!startDate) return '-';
@@ -38,6 +43,14 @@ function formatPeriod(startDate: string, endDate: string) {
 
 function formatDays(value: number) {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function advanceNote(item: OperationHistoryItem) {
+  if (item.advanceDays <= 0) return '-';
+  const breakdown = item.leaveUsageKind === 'MIXED'
+    ? `정기 연차 ${formatDays(item.regularDays)}일 + 선연차 ${formatDays(item.advanceDays)}일`
+    : `선연차 ${formatDays(item.advanceDays)}일`;
+  return `현재 선연차 사용 ${formatDays(item.advanceUsedDaysAtDecision)}일 · 이번 신청: ${breakdown}`;
 }
 
 export default function OperationHistoryManagement({ records }: { records: AdminOperationRecords }) {
@@ -79,21 +92,22 @@ export default function OperationHistoryManagement({ records }: { records: Admin
         </div>
         <div className="table-wrap">
           <table className="data-table">
-            <thead><tr><th>처리 시각</th><th>처리</th><th>신청자</th><th>기간</th><th>구분</th><th>처리자</th><th>잔액 처리</th></tr></thead>
+            <thead><tr><th>처리 시각</th><th>처리</th><th>신청자</th><th>기간</th><th>구분</th><th>처리자</th><th>잔액 처리</th><th>비고</th></tr></thead>
             <tbody>
-              {records.history.length === 0 ? <tr><td className="table-empty" colSpan={7}>처리 이력이 없습니다.</td></tr> : paginatedHistory.items.map(item => (
+              {records.history.length === 0 ? <tr><td className="table-empty" colSpan={8}>처리 이력이 없습니다.</td></tr> : paginatedHistory.items.map(item => (
                 <tr key={item.id}>
                   <td>{formatKstDateTime(item.createdAt)}</td>
                   <td><span className={`status-badge ${item.action === 'REJECT_REQUEST' ? 'status-rejected' : item.action.includes('CANCEL') ? 'status-cancelled' : 'status-approved'}`}>{ACTION_LABELS[item.action]}</span></td>
-                  <td><strong>{item.applicantName || '삭제된 직원'}</strong><span>{item.applicantEmail || item.requestId}</span></td>
+                  <td><strong>{item.applicantName || '삭제된 직원'}</strong></td>
                   <td>{formatPeriod(item.startDate, item.endDate)}</td>
-                  <td>{SOURCE_LABELS[item.source]} · {formatDays(item.days)}일</td>
+                  <td><span className={`leave-kind-badge leave-kind-${item.leaveUsageKind.toLowerCase()}`}>{USAGE_KIND_LABELS[item.leaveUsageKind]}</span> · {formatDays(item.days)}일</td>
                   <td>{item.actorEmail || '-'}</td>
                   <td>{item.action === 'CANCEL_PENDING_REQUEST'
                     ? '예약 해제'
                     : item.action === 'CANCEL_APPROVED_REQUEST'
                       ? item.balanceRestored ? '잔여 복구' : '사용량 유지'
                       : '-'}</td>
+                  <td className="history-note-cell">{advanceNote(item)}</td>
                 </tr>
               ))}
             </tbody>
