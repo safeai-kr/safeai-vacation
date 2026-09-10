@@ -332,10 +332,10 @@ function addYears(value: string, years: number) {
   return toIsoDate(new Date(Date.UTC(year, month, day)));
 }
 
-function kstToday() {
+function kstToday(now = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(new Date());
+  }).formatToParts(now);
   const part = (type: string) => parts.find(item => item.type === type)?.value ?? '';
   return `${part('year')}-${part('month')}-${part('day')}`;
 }
@@ -578,7 +578,7 @@ function effectiveApprover(employee: Employee, teams: Team[], employees: Employe
   return { email: route.approver.email, name: route.approver.name };
 }
 
-function cancellationAccess(request: LeaveRequest, viewerEmail: string, isAdmin: boolean, today = kstToday()) {
+function cancellationAccess(request: LeaveRequest, viewerEmail: string, isAdmin: boolean, now = new Date()) {
   const firstUsageDate = firstLeaveUsageDate(request.workDates, request.startDate);
   return resolveCancellationPolicy({
     status: request.status,
@@ -586,7 +586,8 @@ function cancellationAccess(request: LeaveRequest, viewerEmail: string, isAdmin:
     isAdmin,
     firstUsageDate,
     endDate: request.endDate,
-    today,
+    duration: request.duration,
+    now,
   });
 }
 
@@ -795,6 +796,7 @@ function demoEmployeeProfile(email: string) {
 
 function demoDashboard(viewerEmail: string): LeaveDashboard {
   const state = demoState();
+  const now = new Date();
   const teams: Team[] = [
     { id: 'platform', name: '플랫폼팀', managerEmail: 'platform.lead@safeai.kr', active: true },
     { id: 'ai-research', name: 'AI Research팀', managerEmail: 'research.lead@safeai.kr', active: true },
@@ -868,7 +870,7 @@ function demoDashboard(viewerEmail: string): LeaveDashboard {
     teams,
     rewardGrants: rewardGrants.filter(grant => rewardGrantEmployeeEmails.includes(grant.employeeEmail)),
     requests: requests.map(request => {
-      const cancellation = cancellationAccess(request, viewer.email, isAdmin);
+      const cancellation = cancellationAccess(request, viewer.email, isAdmin, now);
       return {
         ...request,
         reason: request.applicantEmail === viewer.email || request.approverEmail === viewer.email || isAdmin ? request.reason : '',
@@ -1042,7 +1044,7 @@ export function cancelDemoLeaveRequest(requestId: string, actorEmail: string) {
     isAdmin: actor?.position === 'REPRESENTATIVE',
     firstUsageDate: firstLeaveUsageDate(request.workDates, request.startDate),
     endDate: request.endDate,
-    today: kstToday(),
+    duration: request.duration,
   });
   if (!cancellation.canCancel) throw new Error('현재 시점에는 이 신청을 취소할 수 없습니다.');
   const previousStatus = request.status;
@@ -1109,7 +1111,8 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
       ? allEmployees
       : eligibleEmployees.filter(employee => managedTeamIds.includes(employee.teamId)))
       .map(employee => employee.email);
-    const today = kstToday();
+    const now = new Date();
+    const today = kstToday(now);
 
     const balanceForEmployee = (employee: Employee): EmployeeBalance => {
       const employeeLedger = ledger.filter(entry => normalizedEmail(entry.employeeEmail) === employee.email && entry.source === 'ANNUAL');
@@ -1210,7 +1213,7 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
       teams,
       rewardGrants,
       requests: requests.map(request => {
-        const cancellation = cancellationAccess(request, email, isAdmin);
+        const cancellation = cancellationAccess(request, email, isAdmin, now);
         return {
           ...request,
           reason: request.applicantEmail === email || (viewerIsEligible && request.approverEmail === email) || isAdmin ? request.reason : '',
@@ -2188,20 +2191,22 @@ export async function cancelLeaveRequest(requestId: string, actorEmail: string) 
       : await transaction.get(applicantRef);
 
     const firstUsageDate = firstLeaveUsageDate(current.workDates, current.startDate);
-    const today = kstToday();
+    const now = new Date();
+    const today = kstToday(now);
     const cancellation = resolveCancellationPolicy({
       status: current.status,
       isApplicant: current.applicantEmail === email,
       isAdmin,
       firstUsageDate,
       endDate: current.endDate,
-      today,
+      duration: current.duration,
+      now,
     });
     if (!cancellation.canCancel && current.status === 'APPROVED') {
       if (current.endDate < today) {
         throw new Error('사용 기간이 종료된 승인 신청은 취소할 수 없습니다.');
       }
-      throw new Error('시작일 당일 이후의 승인 신청은 관리자만 취소할 수 있습니다.');
+      throw new Error('사용이 시작됐거나 당일 취소 가능 시각이 지난 승인 신청은 관리자만 취소할 수 있습니다.');
     }
 
     const balanceWillRestore = cancellation.balanceWillRestore;

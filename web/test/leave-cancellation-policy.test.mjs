@@ -7,7 +7,8 @@ const base = {
   isAdmin: false,
   firstUsageDate: '2026-07-20',
   endDate: '2026-07-20',
-  today: '2026-07-17',
+  duration: 'FULL_DAY',
+  now: new Date('2026-07-17T06:00:00.000Z'),
 };
 
 test('신청자는 승인 대기 신청을 즉시 취소하고 예약 잔액을 되돌릴 수 있다', () => {
@@ -24,24 +25,76 @@ test('신청자는 시작 전 승인 신청을 취소하고 잔액을 복구할 
   });
 });
 
-test('일반 신청자는 시작일 당일 이후 승인 신청을 취소할 수 없다', () => {
+test('종일 연차와 오전 반차는 사용일 당일 10시 전까지 취소하고 복구한다', () => {
+  const now = new Date('2026-07-20T00:59:59.000Z'); // KST 09:59:59
   assert.deepEqual(resolveCancellationPolicy({
     ...base,
     status: 'APPROVED',
-    firstUsageDate: '2026-07-17',
+    firstUsageDate: '2026-07-20',
+    duration: 'FULL_DAY',
+    now,
+  }), {
+    canCancel: true,
+    balanceWillRestore: true,
+  });
+  assert.deepEqual(resolveCancellationPolicy({
+    ...base,
+    status: 'APPROVED',
+    firstUsageDate: '2026-07-20',
+    duration: 'AM_HALF',
+    now,
+  }), {
+    canCancel: true,
+    balanceWillRestore: true,
+  });
+});
+
+test('종일 연차와 오전 반차는 사용일 당일 10시 정각부터 신청자가 취소할 수 없다', () => {
+  assert.deepEqual(resolveCancellationPolicy({
+    ...base,
+    status: 'APPROVED',
+    firstUsageDate: '2026-07-20',
+    now: new Date('2026-07-20T01:00:00.000Z'), // KST 10:00:00
   }), {
     canCancel: false,
     balanceWillRestore: false,
   });
 });
 
-test('관리자는 시작일 당일 이후 승인 신청을 기록 취소하되 잔액을 자동 복구하지 않는다', () => {
+test('오후 반차는 사용일 당일 14시 전까지 취소하고 복구한다', () => {
+  assert.deepEqual(resolveCancellationPolicy({
+    ...base,
+    status: 'APPROVED',
+    firstUsageDate: '2026-07-20',
+    duration: 'PM_HALF',
+    now: new Date('2026-07-20T04:59:59.000Z'), // KST 13:59:59
+  }), {
+    canCancel: true,
+    balanceWillRestore: true,
+  });
+});
+
+test('오후 반차는 사용일 당일 14시 정각부터 신청자가 취소할 수 없다', () => {
+  assert.deepEqual(resolveCancellationPolicy({
+    ...base,
+    status: 'APPROVED',
+    firstUsageDate: '2026-07-20',
+    duration: 'PM_HALF',
+    now: new Date('2026-07-20T05:00:00.000Z'), // KST 14:00:00
+  }), {
+    canCancel: false,
+    balanceWillRestore: false,
+  });
+});
+
+test('관리자는 당일 기준 시각 이후 승인 신청을 기록 취소하되 잔액을 자동 복구하지 않는다', () => {
   assert.deepEqual(resolveCancellationPolicy({
     ...base,
     status: 'APPROVED',
     isApplicant: false,
     isAdmin: true,
-    firstUsageDate: '2026-07-17',
+    firstUsageDate: '2026-07-20',
+    now: new Date('2026-07-20T01:00:00.000Z'), // KST 10:00:00
   }), {
     canCancel: true,
     balanceWillRestore: false,
@@ -56,6 +109,7 @@ test('사용 기간이 종료된 승인 신청은 관리자도 취소할 수 없
     isAdmin: true,
     firstUsageDate: '2026-07-15',
     endDate: '2026-07-16',
+    now: new Date('2026-07-17T06:00:00.000Z'),
   }), {
     canCancel: false,
     balanceWillRestore: false,

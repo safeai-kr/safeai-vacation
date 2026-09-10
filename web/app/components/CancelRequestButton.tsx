@@ -26,7 +26,7 @@ export default function CancelRequestButton({
       ? '승인 대기 중인 신청을 취소할까요? 예약된 휴가가 다시 사용 가능해집니다.'
       : balanceWillRestore
         ? '승인된 신청을 취소할까요? 차감된 휴가가 복구됩니다.'
-        : '이미 시작된 신청을 관리자 권한으로 취소할까요? 사용 내역과 잔여 휴가는 유지됩니다.';
+        : '사용이 시작됐거나 복구 가능 시각이 지난 신청을 관리자 권한으로 취소할까요? 사용 내역과 잔여 휴가는 유지됩니다.';
     if (!window.confirm(confirmation)) return;
 
     setState('loading');
