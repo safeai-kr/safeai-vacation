@@ -12,6 +12,7 @@ const ACTION_LABELS: Record<OperationHistoryItem['action'], string> = {
   CANCEL_PENDING_REQUEST: '대기 신청 취소',
   CANCEL_APPROVED_REQUEST: '승인 신청 취소',
   AUTO_APPROVE_REPRESENTATIVE: '대표 자동 승인',
+  ADMIN_REGISTER_LEAVE: '관리자 사용 등록',
 };
 
 const OPERATION_LABELS: Record<string, string> = {
@@ -27,6 +28,7 @@ const OPERATION_LABELS: Record<string, string> = {
   SYNC_ANNUAL_GRANTS: '연차 자동 계산',
   DASHBOARD_LOAD: '연차 화면 조회',
   DELETE_CALENDAR_EVENT: '캘린더 일정 삭제',
+  ADMIN_REGISTER_LEAVE: '관리자 연차 사용 등록',
 };
 
 const USAGE_KIND_LABELS: Record<LeaveUsageKind, string> = {
@@ -46,6 +48,9 @@ function formatDays(value: number) {
 }
 
 function advanceNote(item: OperationHistoryItem) {
+  if (item.action === 'ADMIN_REGISTER_LEAVE') {
+    return `등록 직후 정기 잔액 ${formatDays(item.balanceAfterRegistration ?? 0)}일 · 사유: ${item.registrationReason || '-'}`;
+  }
   if (item.advanceDays <= 0) return '-';
   const breakdown = item.leaveUsageKind === 'MIXED'
     ? `정기 연차 ${formatDays(item.regularDays)}일 + 선연차 ${formatDays(item.advanceDays)}일`
@@ -87,7 +92,7 @@ export default function OperationHistoryManagement({ records }: { records: Admin
     <div className="history-layout">
       <section className="content-card">
         <div className="card-header">
-          <div><h2>승인·반려·취소 처리 이력</h2><p>최근 감사 로그 200건 범위에서 확인된 상태 처리 기록입니다.</p></div>
+          <div><h2>승인·반려·취소·관리자 등록 이력</h2><p>최근 감사 로그 200건 범위에서 확인된 상태 처리 기록입니다.</p></div>
           <span>표시 {records.history.length}건</span>
         </div>
         <div className="table-wrap">
@@ -106,7 +111,7 @@ export default function OperationHistoryManagement({ records }: { records: Admin
                     ? '예약 해제'
                     : item.action === 'CANCEL_APPROVED_REQUEST'
                       ? item.balanceRestored ? '잔여 복구' : '사용량 유지'
-                      : '-'}</td>
+                      : item.action === 'ADMIN_REGISTER_LEAVE' ? `${formatDays(item.days)}일 차감` : '-'}</td>
                   <td className="history-note-cell">{advanceNote(item)}</td>
                 </tr>
               ))}

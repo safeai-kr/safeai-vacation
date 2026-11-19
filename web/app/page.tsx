@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic';
 
 import CancelRequestButton from './components/CancelRequestButton';
+import AdminLeaveRegistration from './components/AdminLeaveRegistration';
 import { DashboardTabPanel, DashboardTabs, type DashboardTab } from './components/DashboardTabs';
 import DecisionButtons from './components/DecisionButtons';
 import EmployeeManagement from './components/EmployeeManagement';
@@ -65,6 +66,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
     || (requestedTab === 'rewards' && dashboard.viewer.canGrantReward)
     || (requestedTab === 'employees' && dashboard.viewer.isAdmin)
     || (requestedTab === 'history' && dashboard.viewer.isAdmin)
+    || (requestedTab === 'admin-registration' && dashboard.viewer.isAdmin)
     ? requestedTab
     : 'overview';
   const operationRecords = dashboard.viewer.isAdmin
@@ -74,6 +76,9 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
   const myRequests = dashboard.requests.filter(request => request.applicantEmail === session.email);
   const pendingRequests = dashboard.requests.filter(request => request.status === 'PENDING' && request.approverEmail === session.email);
   const recentRequests = dashboard.requests.filter(request => request.status === 'PENDING' || request.status === 'APPROVED').slice(0, 10);
+  const adminRegisteredRequests = dashboard.viewer.isAdmin
+    ? dashboard.requests.filter(request => request.registrationType === 'ADMIN')
+    : [];
   const adminCancelableRequests = dashboard.viewer.isAdmin
     ? dashboard.requests.filter((request): request is CancellableRequest => (request.status === 'PENDING' || request.status === 'APPROVED') && request.canCancel)
     : [];
@@ -85,6 +90,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
     ...(dashboard.viewer.canApprove ? [{ id: 'approvals' as const, label: '승인 관리', badge: pendingRequests.length }] : []),
     ...(dashboard.viewer.canGrantReward ? [{ id: 'rewards' as const, label: '포상 연차' }] : []),
     ...(dashboard.viewer.isAdmin ? [
+      { id: 'admin-registration' as const, label: '연차 사용 등록' },
       { id: 'employees' as const, label: '직원 관리' },
       { id: 'history' as const, label: '기록 관리' },
     ] : []),
@@ -129,7 +135,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
           <section className={`summary-grid ${showAdvanceSummary ? 'summary-grid-with-advance' : ''}`}>
             <article className="summary-card primary-summary">
               <span>잔여 정기 연차</span>
-              <strong>{myBalance ? formatDays(myBalance.annualRemainingDays) : '—'}<small>일</small></strong>
+              <strong>{myBalance ? formatDays(myBalance.annualNetRemainingDays) : '—'}<small>일</small></strong>
             </article>
             <article className="summary-card">
               <span>잔여 포상휴가</span>
@@ -163,7 +169,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
             <div className="table-wrap">
               <table className="data-table">
                 <thead>
-                  <tr><th>구성원</th><th>소속</th><th>정기 부여</th><th>정기 사용</th><th>승인 대기</th><th>발생 잔여</th><th>선연차 사용</th><th>선연차 대기</th><th>추가 가능</th><th>신청 가능</th><th>포상 잔여</th></tr>
+                  <tr><th>구성원</th><th>소속</th><th>정기 부여</th><th>정기 사용</th><th>승인 대기</th><th>정기 잔여</th><th>선연차 사용</th><th>선연차 대기</th><th>추가 가능</th><th>신청 가능</th><th>포상 잔여</th></tr>
                 </thead>
                 <tbody>
                   {dashboard.balances.map(balance => (
@@ -173,7 +179,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
                       <td>{formatDays(balance.annualGrantedDays)}일</td>
                       <td>{formatDays(balance.annualUsedDays)}일</td>
                       <td>{balance.annualPendingDays + balance.rewardPendingDays > 0 ? `${formatDays(balance.annualPendingDays + balance.rewardPendingDays)}일` : '-'}</td>
-                      <td>{formatDays(balance.annualRemainingDays)}일</td>
+                      <td>{formatDays(balance.annualNetRemainingDays)}일</td>
                       <td>{isUnderOneYear(balance.hireDate) ? `${formatDays(balance.annualAdvanceUsedDays)}일` : '-'}</td>
                       <td>{isUnderOneYear(balance.hireDate) ? `${formatDays(balance.annualAdvancePendingDays)}일` : '-'}</td>
                       <td>{isUnderOneYear(balance.hireDate) ? `${formatDays(balance.annualAdvanceAvailableDays)}일` : '-'}</td>
@@ -202,7 +208,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
                       <td>{formatPeriod(request.startDate, request.endDate)} · {formatDays(request.days)}일</td>
                       <td><span className={`leave-kind-badge leave-kind-${request.leaveUsageKind.toLowerCase()}`}>{USAGE_KIND_COPY[request.leaveUsageKind]}</span></td>
                       <td>{DURATION_COPY[request.duration]}</td>
-                      <td><span className={`status-badge ${STATUS_COPY[request.status].className}`}>{STATUS_COPY[request.status].label}</span></td>
+                      <td><span className={`status-badge ${STATUS_COPY[request.status].className}`}>{STATUS_COPY[request.status].label}</span>{request.registrationType === 'ADMIN' && <> <span className="leave-kind-badge admin-registration-badge">관리자 등록</span></>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -236,12 +242,14 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
                     <div>
                       <strong>{formatPeriod(request.startDate, request.endDate)}</strong>
                       <span><span className={`leave-kind-badge leave-kind-${request.leaveUsageKind.toLowerCase()}`}>{USAGE_KIND_COPY[request.leaveUsageKind]}</span> · {DURATION_COPY[request.duration]} · {formatDays(request.days)}일</span>
+                      {request.registrationType === 'ADMIN' && <span><span className="leave-kind-badge admin-registration-badge">관리자 등록</span> · {request.registeredByName || request.registeredBy}</span>}
                     </div>
                     <span className={`status-badge ${STATUS_COPY[request.status].className}`}>{STATUS_COPY[request.status].label}</span>
                   </div>
                   {request.reason && (
                     <div className="request-notes">
-                      <p><b>상세 사유</b>{request.reason}</p>
+                      <p><b>{request.registrationType === 'ADMIN' ? '등록 사유' : '상세 사유'}</b>{request.reason}</p>
+                      {request.registrationType === 'ADMIN' && <p><b>등록 직후</b>정기 잔액 {formatDays(request.balanceAfterRegistration ?? 0)}일</p>}
                       {request.status === 'CANCELLED' && !request.cancellationBalanceRestored && (
                         <p><b>취소 처리</b>사용량과 잔여 휴가는 유지됨</p>
                       )}
@@ -292,6 +300,28 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
 
           {dashboard.viewer.isAdmin && (
             <section className="content-card">
+              <div className="card-header"><div><h2>관리자 등록 내역</h2><p>관리자가 사용을 확정한 내역입니다. 별도 승인은 필요하지 않습니다.</p></div><span>총 {adminRegisteredRequests.length}건</span></div>
+              <PaginatedList className="approval-list" emptyText="관리자가 등록한 사용 내역이 없습니다." ariaLabel="관리자 연차 사용 등록 내역 페이지">
+                {adminRegisteredRequests.map(request => (
+                  <article className="approval-row" key={request.requestId}>
+                    <div className="approval-info">
+                      <div className="approval-user"><strong>{request.applicantName}</strong><span className="leave-kind-badge admin-registration-badge">관리자 등록</span><span className={`status-badge ${STATUS_COPY[request.status].className}`}>{STATUS_COPY[request.status].label}</span></div>
+                      <dl>
+                        <div><dt>사용 기간</dt><dd>{formatPeriod(request.startDate, request.endDate)}</dd></div>
+                        <div><dt>사용 일수</dt><dd>{DURATION_COPY[request.duration]} · {formatDays(request.days)}일</dd></div>
+                        <div><dt>등록자</dt><dd>{request.registeredByName || request.registeredBy} · {formatTimestampDate(request.createdAt)}</dd></div>
+                        <div><dt>등록 직후</dt><dd>정기 잔액 {formatDays(request.balanceAfterRegistration ?? 0)}일</dd></div>
+                        <div><dt>등록 사유</dt><dd>{request.reason}</dd></div>
+                      </dl>
+                    </div>
+                  </article>
+                ))}
+              </PaginatedList>
+            </section>
+          )}
+
+          {dashboard.viewer.isAdmin && (
+            <section className="content-card">
               <div className="card-header">
                 <div>
                   <h2>전체 신청 취소</h2>
@@ -307,6 +337,7 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
                       <dl>
                         <div><dt>기간</dt><dd>{formatPeriod(request.startDate, request.endDate)}</dd></div>
                         <div><dt>구분</dt><dd><span className={`leave-kind-badge leave-kind-${request.leaveUsageKind.toLowerCase()}`}>{USAGE_KIND_COPY[request.leaveUsageKind]}</span> · {DURATION_COPY[request.duration]} · {formatDays(request.days)}일</dd></div>
+                        {request.registrationType === 'ADMIN' && <div><dt>등록 방식</dt><dd><span className="leave-kind-badge admin-registration-badge">관리자 등록</span> · {request.registeredByName || request.registeredBy}</dd></div>}
                         <div><dt>취소 처리</dt><dd>{request.status === 'PENDING' ? '승인 대기 예약 해제' : request.cancelBalanceWillRestore ? '잔여 휴가 복구' : '사용량 유지 · 신청 상태만 취소'}</dd></div>
                         <div><dt>상세 사유</dt><dd>{request.reason || '-'}</dd></div>
                       </dl>
@@ -326,6 +357,14 @@ export default async function LeaveDashboardPage({ searchParams }: { searchParam
             </section>
           )}
         </div>
+        </DashboardTabPanel>
+      )}
+
+      {dashboard.viewer.isAdmin && (
+        <DashboardTabPanel tab="admin-registration">
+          <div className="tab-content">
+            <AdminLeaveRegistration employees={dashboard.balances} currentDate={new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())} />
+          </div>
         </DashboardTabPanel>
       )}
 

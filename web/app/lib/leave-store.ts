@@ -3,6 +3,7 @@ import 'server-only';
 import crypto from 'crypto';
 import { FieldValue, Timestamp } from '@google-cloud/firestore';
 import { isDemoMode } from './auth';
+import { validateAdminLeaveRegistration, type AdminLeaveRegistrationInput } from './admin-leave-registration-policy';
 import { adminErrorDiagnostic, DomainError as Error } from './api-error';
 import { resolveApprovalRoute, type ApprovalRouteError } from './approval-routing-policy';
 import { diagnoseFirebaseConnection, firestore, type FirebaseConnectionDiagnostic } from './firebase-admin';
@@ -41,6 +42,7 @@ export interface LeaveIntegrationRequest {
   reason: string;
   slackChannelId?: string;
   slackMessageTs?: string;
+  registrationType?: 'ADMIN';
 }
 
 export interface Employee {
@@ -70,6 +72,7 @@ export interface EmployeeBalance extends Employee {
   annualUsedDays: number;
   annualPendingDays: number;
   annualRemainingDays: number;
+  annualNetRemainingDays: number;
   annualAdvanceUsedDays: number;
   annualAdvancePendingDays: number;
   annualAdvanceAvailableDays: number;
@@ -114,6 +117,11 @@ export interface LeaveRequest {
   cancellationBalanceRestored: boolean;
   canCancel: boolean;
   cancelBalanceWillRestore: boolean;
+  registrationType?: 'ADMIN';
+  registeredBy?: string;
+  registeredByName?: string;
+  balanceAfterRegistration?: number;
+  balanceEffectiveDate?: string;
 }
 
 export interface LeaveDashboard {
@@ -225,7 +233,7 @@ interface RewardGrant {
 
 export interface OperationHistoryItem {
   id: string;
-  action: 'APPROVE_REQUEST' | 'REJECT_REQUEST' | 'CANCEL_PENDING_REQUEST' | 'CANCEL_APPROVED_REQUEST' | 'AUTO_APPROVE_REPRESENTATIVE';
+  action: 'APPROVE_REQUEST' | 'REJECT_REQUEST' | 'CANCEL_PENDING_REQUEST' | 'CANCEL_APPROVED_REQUEST' | 'AUTO_APPROVE_REPRESENTATIVE' | 'ADMIN_REGISTER_LEAVE';
   actorEmail: string;
   requestId: string;
   applicantEmail: string;
@@ -239,6 +247,8 @@ export interface OperationHistoryItem {
   advanceDays: number;
   advanceUsedDaysAtDecision: number;
   balanceRestored: boolean;
+  registrationReason?: string;
+  balanceAfterRegistration?: number;
   createdAt: string;
 }
 
@@ -496,6 +506,11 @@ function parseRequest(id: string, data: FirebaseFirestore.DocumentData): LeaveRe
     cancellationBalanceRestored: data.cancellationBalanceRestored === true,
     canCancel: false,
     cancelBalanceWillRestore: false,
+    registrationType: data.registrationType === 'ADMIN' ? 'ADMIN' : undefined,
+    registeredBy: normalizedEmail(data.registeredBy),
+    registeredByName: String(data.registeredByName ?? ''),
+    balanceAfterRegistration: data.balanceAfterRegistration === undefined ? undefined : numberValue(data.balanceAfterRegistration),
+    balanceEffectiveDate: String(data.balanceEffectiveDate ?? ''),
   };
 }
 
@@ -803,7 +818,7 @@ function demoDashboard(viewerEmail: string): LeaveDashboard {
     { id: 'strategy-planning', name: '전략기획팀', managerEmail: 'strategy.lead@safeai.kr', active: true },
     { id: 'management-support', name: '경영지원팀', managerEmail: 'support.lead@safeai.kr', active: true },
   ];
-  const base: Omit<EmployeeBalance, 'teamName' | 'effectiveApproverEmail' | 'effectiveApproverName' | 'annualAdvanceUsedDays' | 'annualAdvancePendingDays' | 'annualAdvanceAvailableDays' | 'annualFutureGrantDays' | 'annualRequestableDays'>[] = [
+  const base: Omit<EmployeeBalance, 'teamName' | 'effectiveApproverEmail' | 'effectiveApproverName' | 'annualAdvanceUsedDays' | 'annualAdvancePendingDays' | 'annualAdvanceAvailableDays' | 'annualFutureGrantDays' | 'annualRequestableDays' | 'annualNetRemainingDays'>[] = [
     { email: 'ceo@safeai.kr', name: '김대표', hireDate: '2022-01-03', teamId: '', position: 'REPRESENTATIVE', permission: 'ADMIN', slackUserId: 'UCEO001', active: true, employmentStatus: 'ACTIVE', profileStatus: 'COMPLETE', openingAnnualUsedDays: 0, annualGrantedDays: 17, annualUsedDays: 5, annualPendingDays: 0, annualRemainingDays: 12, rewardGrantedDays: 2, rewardUsedDays: 1, rewardPendingDays: 0, rewardRemainingDays: 1 },
     { email: 'platform.lead@safeai.kr', name: '박팀장', hireDate: '2024-02-01', teamId: 'platform', position: 'TEAM_LEAD', permission: 'GENERAL', slackUserId: 'UPL001', active: true, employmentStatus: 'ACTIVE', profileStatus: 'COMPLETE', openingAnnualUsedDays: 2, annualGrantedDays: 15, annualUsedDays: 7, annualPendingDays: 1, annualRemainingDays: 7, rewardGrantedDays: 1, rewardUsedDays: 0, rewardPendingDays: 0, rewardRemainingDays: 1 },
     { email: 'member@safeai.kr', name: '정직원', hireDate: addMonths(kstToday(), -8), teamId: 'platform', position: 'EMPLOYEE', permission: 'GENERAL', slackUserId: 'UMEMBER01', active: true, employmentStatus: 'ACTIVE', profileStatus: 'COMPLETE', openingAnnualUsedDays: 0, annualGrantedDays: 8, annualUsedDays: 7.5, annualPendingDays: 0, annualRemainingDays: 0.5, rewardGrantedDays: 1, rewardUsedDays: 0.5, rewardPendingDays: 0, rewardRemainingDays: 0.5 },
@@ -842,6 +857,7 @@ function demoDashboard(viewerEmail: string): LeaveDashboard {
       annualUsedDays: Math.max(employee.annualGrantedDays - ledgerBalanceDays, 0),
       annualPendingDays,
       annualRemainingDays: annualAvailability.accruedRemainingDays,
+      annualNetRemainingDays: ledgerBalanceDays - annualPendingDays,
       annualAdvanceUsedDays: annualAvailability.advanceUsedDays,
       annualAdvancePendingDays: annualAvailability.advancePendingDays,
       annualAdvanceAvailableDays: annualAvailability.advanceAvailableDays,
@@ -991,6 +1007,8 @@ function demoHistoryItem(
     advanceDays: request.advanceDays,
     advanceUsedDaysAtDecision: request.advanceUsedDaysAtDecision,
     balanceRestored,
+    registrationReason: request.registrationType === 'ADMIN' ? request.reason : undefined,
+    balanceAfterRegistration: request.balanceAfterRegistration,
     createdAt: new Date().toISOString(),
   };
 }
@@ -1147,6 +1165,7 @@ export async function fetchLeaveDashboard(viewerEmail: string): Promise<LeaveDas
         annualUsedDays,
         annualPendingDays,
         annualRemainingDays: annualAvailability.accruedRemainingDays,
+        annualNetRemainingDays: annualBalance - annualPendingDays,
         annualAdvanceUsedDays: annualAvailability.advanceUsedDays,
         annualAdvancePendingDays: annualAvailability.advancePendingDays,
         annualAdvanceAvailableDays: annualAvailability.advanceAvailableDays,
@@ -1808,7 +1827,191 @@ function integrationRequestFromData(
     reason: request.reason,
     slackChannelId: String(data.slackChannelId ?? ''),
     slackMessageTs: String(data.slackMessageTs ?? ''),
+    registrationType: request.registrationType,
   };
+}
+
+function validatedAdminRegistration(input: AdminLeaveRegistrationInput) {
+  const result = validateAdminLeaveRegistration({ ...input });
+  if (!result.ok) throw new Error(result.error);
+  return result.input;
+}
+
+function checkAdminRegistrationRetry(request: LeaveRequest, actor: string, input: AdminLeaveRegistrationInput) {
+  if (request.registrationType !== 'ADMIN' || request.registeredBy !== actor
+    || request.applicantEmail !== input.employeeEmail || request.duration !== input.duration
+    || request.startDate !== input.startDate || request.endDate !== input.endDate || request.reason !== input.reason) {
+    throw new Error('동일한 등록 정보로 다른 내용이 제출되었습니다. 화면을 새로고침해 주세요.');
+  }
+  return {
+    requestId: request.requestId,
+    days: request.days,
+    balanceAfterRegistration: request.balanceAfterRegistration ?? 0,
+    alreadyRegistered: true,
+  };
+}
+
+export function registerDemoAdminLeave(actorEmail: string, rawInput: AdminLeaveRegistrationInput) {
+  const actor = normalizedEmail(actorEmail);
+  const viewer = demoDashboard(actor).viewer;
+  if (viewer.email !== actor || !viewer.isAdmin) {
+    throw new Error('관리자만 연차 사용을 등록할 수 있습니다.');
+  }
+  const input = validatedAdminRegistration(rawInput);
+  const target = demoEmployeeProfile(input.employeeEmail);
+  if (!target) throw new Error('등록이 완료된 활성 직원을 선택해 주세요.');
+  if (input.workDates[0] < target.hireDate) throw new Error('입사일 이전의 연차는 등록할 수 없습니다.');
+  const state = demoState();
+  const requestId = `demo-admin-${ledgerId(`${actor}:${input.registrationKey}`)}`;
+  const previous = state.requests.find(request => request.requestId === requestId);
+  if (previous) return checkAdminRegistrationRetry(previous, actor, input);
+  if (state.requests.some(request => request.applicantEmail === input.employeeEmail && isRequestConflict(request, input.duration, input.workDates))) {
+    throw new Error('같은 날짜와 시간대에 이미 승인 또는 대기 중인 신청이 있습니다.');
+  }
+  const actorName = demoEmployeeProfile(actor)?.name ?? actor;
+  const now = new Date().toISOString();
+  const balanceAfterRegistration = (state.annualLedgerBalances[input.employeeEmail] ?? 0) - input.days;
+  const request: LeaveRequest = {
+    requestId,
+    applicantEmail: input.employeeEmail,
+    applicantName: target.name,
+    approverEmail: actor,
+    approverName: actorName,
+    source: 'ANNUAL',
+    duration: input.duration,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    workDates: input.workDates,
+    days: input.days,
+    leaveUsageKind: 'REGULAR',
+    regularDays: input.days,
+    advanceDays: 0,
+    advanceUsedDaysAtDecision: Math.max(-balanceAfterRegistration, 0),
+    reason: input.reason,
+    status: 'APPROVED',
+    createdAt: now,
+    decidedAt: now,
+    cancelledAt: '',
+    cancelledBy: '',
+    cancellationBalanceRestored: false,
+    canCancel: false,
+    cancelBalanceWillRestore: false,
+    registrationType: 'ADMIN',
+    registeredBy: actor,
+    registeredByName: actorName,
+    balanceAfterRegistration,
+    balanceEffectiveDate: kstToday(),
+  };
+  state.annualLedgerBalances[input.employeeEmail] = balanceAfterRegistration;
+  state.requests.unshift(request);
+  state.history.unshift(demoHistoryItem(request, actor, 'ADMIN_REGISTER_LEAVE'));
+  return { requestId, days: input.days, balanceAfterRegistration, alreadyRegistered: false };
+}
+
+export async function registerAdminLeave(actorEmail: string, rawInput: AdminLeaveRegistrationInput) {
+  const actor = normalizedEmail(actorEmail);
+  await requireAdmin(actor);
+  const input = validatedAdminRegistration(rawInput);
+  const db = firestore();
+  const employeeRef = db.collection('employees').doc(input.employeeEmail);
+  const target = await employeeRef.get();
+  if (!target.exists || !isEligibleEmployeeData(target.data(), input.employeeEmail)) {
+    throw new Error('등록이 완료된 활성 직원을 선택해 주세요.');
+  }
+  await syncAnnualGrants(input.employeeEmail);
+  const requestId = ledgerId(`ADMIN_REGISTER:${actor}:${input.registrationKey}`);
+  const requestRef = db.collection('leave_requests').doc(requestId);
+  return db.runTransaction(async transaction => {
+    const [actorDoc, employeeDoc, existingDoc, requestSnapshot, ledgerSnapshot] = await Promise.all([
+      transaction.get(db.collection('employees').doc(actor)),
+      transaction.get(employeeRef),
+      transaction.get(requestRef),
+      transaction.get(db.collection('leave_requests').where('applicantEmail', '==', input.employeeEmail)),
+      transaction.get(db.collection('leave_ledger').where('employeeEmail', '==', input.employeeEmail)),
+    ]);
+    if (!hasAdminAccess(actor, actorDoc.data())) throw new Error('관리자만 연차 사용을 등록할 수 있습니다.');
+    if (existingDoc.exists) return checkAdminRegistrationRetry(parseRequest(requestId, existingDoc.data() ?? {}), actor, input);
+    if (!employeeDoc.exists || !isEligibleEmployeeData(employeeDoc.data(), input.employeeEmail)) {
+      throw new Error('등록이 완료된 활성 직원을 선택해 주세요.');
+    }
+    if (input.workDates[0] < String(employeeDoc.data()?.hireDate ?? '')) throw new Error('입사일 이전의 연차는 등록할 수 없습니다.');
+    const requests = requestSnapshot.docs.map(doc => parseRequest(doc.id, doc.data()));
+    if (requests.some(request => isRequestConflict(request, input.duration, input.workDates))) {
+      throw new Error('같은 날짜와 시간대에 이미 승인 또는 대기 중인 신청이 있습니다.');
+    }
+    const balanceBeforeRegistration = ledgerSnapshot.docs.filter(doc => doc.data().source === 'ANNUAL')
+      .reduce((sum, doc) => sum + numberValue(doc.data().days), 0);
+    const balanceAfterRegistration = balanceBeforeRegistration - input.days;
+    const actorName = String(actorDoc.data()?.name ?? actor);
+    // Historical use is booked against today's balance; its actual date stays on the request.
+    const balanceEffectiveDate = kstToday();
+    const requestData = {
+      applicantEmail: input.employeeEmail,
+      applicantName: String(employeeDoc.data()?.name ?? input.employeeEmail),
+      approverEmail: actor,
+      approverName: actorName,
+      approverSlackUserId: String(actorDoc.data()?.slackUserId ?? ''),
+      source: 'ANNUAL',
+      duration: input.duration,
+      startDate: input.startDate,
+      endDate: input.endDate,
+      workDates: input.workDates,
+      days: input.days,
+      leaveUsageKind: 'REGULAR',
+      regularDays: input.days,
+      advanceDays: 0,
+      advanceUsedDaysAtDecision: Math.max(-balanceAfterRegistration, 0),
+      reason: input.reason,
+      registrationType: 'ADMIN',
+      registeredBy: actor,
+      registeredByName: actorName,
+      balanceAfterRegistration,
+      balanceEffectiveDate,
+      status: 'APPROVED',
+      createdAt: FieldValue.serverTimestamp(),
+      decidedAt: FieldValue.serverTimestamp(),
+      decidedBy: actor,
+      cancelledAt: null,
+    };
+    transaction.create(requestRef, requestData);
+    transaction.create(db.collection('leave_ledger').doc(ledgerId(`USE:${requestId}`)), {
+      employeeEmail: input.employeeEmail,
+      source: 'ANNUAL',
+      entryType: 'USE',
+      days: -input.days,
+      effectiveDate: balanceEffectiveDate,
+      usageDate: input.workDates[0],
+      registrationType: 'ADMIN',
+      requestId,
+      rewardGrantId: '',
+      reason: input.reason,
+      idempotencyKey: `USE:${requestId}`,
+      createdAt: FieldValue.serverTimestamp(),
+      createdBy: actor,
+    });
+    transaction.update(employeeRef, {
+      leaveMutationVersion: FieldValue.increment(1),
+      leaveMutationAt: FieldValue.serverTimestamp(),
+    });
+    transaction.create(db.collection('audit_logs').doc(ledgerId(`ADMIN_REGISTER:${requestId}`)), {
+      actorEmail: actor,
+      action: 'ADMIN_REGISTER_LEAVE',
+      targetType: 'LEAVE_REQUEST',
+      targetId: requestId,
+      requestId,
+      employeeEmail: input.employeeEmail,
+      reason: input.reason,
+      leaveUsageKind: 'REGULAR',
+      regularDays: input.days,
+      advanceDays: 0,
+      advanceUsedDaysAtDecision: Math.max(-balanceAfterRegistration, 0),
+      balanceBeforeRegistration,
+      balanceAfterRegistration,
+      after: { status: 'APPROVED' },
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return { requestId, days: input.days, balanceAfterRegistration, alreadyRegistered: false };
+  });
 }
 
 export async function createLeaveRequest(actor: { email: string; name: string }, input: NewLeaveRequestInput) {
@@ -2230,7 +2433,8 @@ export async function cancelLeaveRequest(requestId: string, actorEmail: string) 
           && normalizedEmail(useData?.employeeEmail) === current.applicantEmail
           && String(useData?.requestId ?? '') === requestId
           && DATE_PATTERN.test(useEffectiveDate)
-          && (useEffectiveDate === firstUsageDate || useEffectiveDate === current.startDate)
+          && (useEffectiveDate === firstUsageDate || useEffectiveDate === current.startDate
+            || (current.registrationType === 'ADMIN' && useData?.registrationType === 'ADMIN' && useEffectiveDate === current.balanceEffectiveDate))
           && Math.abs(numberValue(useData?.days) + current.days) < 0.0001;
         if (!validUse) throw new Error('연차 원장 데이터가 신청 상태와 일치하지 않아 취소할 수 없습니다.');
         annualUseEffectiveDate = useEffectiveDate;
@@ -2313,6 +2517,7 @@ export async function cancelLeaveRequest(requestId: string, actorEmail: string) 
 }
 
 const HISTORY_ACTIONS = new Set<OperationHistoryItem['action']>([
+  'ADMIN_REGISTER_LEAVE',
   'APPROVE_REQUEST',
   'REJECT_REQUEST',
   'CANCEL_PENDING_REQUEST',
@@ -2361,6 +2566,8 @@ export async function fetchAdminOperationRecords(
         ? request?.advanceUsedDaysAtDecision ?? 0
         : numberValue(data.advanceUsedDaysAtDecision),
       balanceRestored: data.after?.balanceRestored === true,
+      registrationReason: action === 'ADMIN_REGISTER_LEAVE' ? String(data.reason ?? request?.reason ?? '') : undefined,
+      balanceAfterRegistration: data.balanceAfterRegistration === undefined ? undefined : numberValue(data.balanceAfterRegistration),
       createdAt: dateValue(data.createdAt),
     }];
   });

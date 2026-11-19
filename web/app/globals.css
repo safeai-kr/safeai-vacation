@@ -55,6 +55,7 @@ main.page-shell { padding-top: 28px; padding-bottom: 56px; }
 [data-active-dashboard-tab="approvals"] > [data-dashboard-tab-panel="approvals"],
 [data-active-dashboard-tab="rewards"] > [data-dashboard-tab-panel="rewards"],
 [data-active-dashboard-tab="employees"] > [data-dashboard-tab-panel="employees"],
+[data-active-dashboard-tab="admin-registration"] > [data-dashboard-tab-panel="admin-registration"],
 [data-active-dashboard-tab="history"] > [data-dashboard-tab-panel="history"] { display: block; }
 .tab-content { padding-top: 20px; }
 
@@ -158,6 +159,9 @@ textarea.field-input { height: 96px; min-height: 96px; resize: vertical; }
 .leave-kind-advance { color: #9f1239; background: #fff1f2; }
 .leave-kind-mixed { color: #6d28d9; background: #f5f3ff; }
 .leave-kind-reward { color: #a16207; background: #fefce8; }
+.admin-registration-badge { color: #92400e; background: #fffbeb; }
+.admin-registration-fields { min-width: 0; padding: 0; border: 0; margin: 0; }
+.admin-registration-preview { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 12px; margin-top: 12px; border-radius: 7px; background: #f8fafc; font-size: 12px; }
 .list-empty { padding: 48px 20px; color: var(--muted); font-size: 13px; text-align: center; }
 .admin-layout { display: grid; gap: 16px; }
 .admin-forms { display: grid; grid-template-columns: minmax(280px, .72fr) minmax(460px, 1.28fr); gap: 16px; align-items: stretch; }

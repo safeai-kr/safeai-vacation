@@ -2,7 +2,7 @@
 
 import { ReactNode, useEffect, useState } from 'react';
 
-export type DashboardTab = 'overview' | 'requests' | 'approvals' | 'rewards' | 'employees' | 'history';
+export type DashboardTab = 'overview' | 'requests' | 'approvals' | 'rewards' | 'employees' | 'history' | 'admin-registration';
 
 type TabItem = {
   id: DashboardTab;

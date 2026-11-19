@@ -24,7 +24,7 @@ export async function POST(
 
   try {
     const result = await cancelLeaveRequest(requestId, session.email);
-    if (!result.alreadyCancelled && result.cancelledFromStatus === 'APPROVED') {
+    if (!result.alreadyCancelled && result.cancelledFromStatus === 'APPROVED' && result.integrationRequest.registrationType !== 'ADMIN') {
       after(async () => {
         const calendar = await runCancelledLeaveIntegration(result.integrationRequest, false);
         if (calendar.status === 'rejected') {
